@@ -1,7 +1,5 @@
-import glob
-import os
 import numpy as np
-import logging
+import os, glob, logging
 
 import torch
 from torch.utils.data import Dataset
@@ -13,6 +11,7 @@ logger = logging.getLogger(__name__)
 class ClampTransform(torch.nn.Module):
     def forward(self, img):
         return torch.clamp(img, 0, 1)
+
 
 class GaussianNoise(torch.nn.Module):
     """Adds Gaussian noise to the tensor to simulate sonar speckle/electronic noise."""
@@ -26,7 +25,9 @@ class GaussianNoise(torch.nn.Module):
         if torch.rand(1).item() < self.p:
             noise = torch.randn_like(img) * self.sigma + self.mean
             return img + noise
+
         return img
+
 
 class SonarDataset(Dataset):
     """
@@ -45,22 +46,17 @@ class SonarDataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        path = self.files[idx]
-        # Load npy file
-        data = np.load(path).astype(np.float32)
-        
-        # Ensure it is (H, W) or (1, H, W)
+        data = np.load(self.files[idx]).astype(np.float32)
+
         if data.ndim == 2:
             data = data[np.newaxis, :, :] # Add channel dim -> (1, 384, 384)
-            
-        # Convert to tensor
+
         tensor = torch.from_numpy(data)
-        
-        # Safety check for NaNs/Infs which ruin contrastive learning
         if torch.isnan(tensor).any() or torch.isinf(tensor).any():
             tensor = torch.nan_to_num(tensor, nan=0.0, posinf=1.0, neginf=0.0)
-            
+
         return tensor
+
 
 class SonarDataTransform:
     """
@@ -76,13 +72,11 @@ class SonarDataTransform:
         local_crops_size=96,
     ):
         self.local_crops_number = local_crops_number
-        
-        # 1. Geometric Augmentations (Spatial Invariance)
+
         # We use RandomResizedCrop to force the model to match features across scales.
         self.geo_global = v2.Compose([
             v2.RandomResizedCrop(global_crops_size, scale=global_crops_scale, antialias=True),
             v2.RandomHorizontalFlip(p=0.5),
-            # Optional: Vertical flip if your survey lines have varying headings
             v2.RandomVerticalFlip(p=0.5), 
         ])
 
@@ -92,8 +86,6 @@ class SonarDataTransform:
             v2.RandomVerticalFlip(p=0.5),
         ])
 
-        # 2. Intensity Augmentations (Robustness to Gain/Contrast/Noise)
-        # Note: We omit Hue/Saturation since we are 1-channel.
         self.intensity_trans = v2.Compose([
             v2.RandomApply([
                 v2.ColorJitter(brightness=0.4, contrast=0.4, saturation=0, hue=0)
@@ -108,10 +100,8 @@ class SonarDataTransform:
         ])
 
     def __call__(self, image):
-        # image is (1, 384, 384) tensor
-        
         crops = []
-        
+
         # --- Global Crops (2 views) ---
         # Used by both Teacher and Student
         for _ in range(2):

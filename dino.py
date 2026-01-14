@@ -12,6 +12,7 @@ class DropPath(nn.Module):
     def forward(self, x):
         if self.drop_prob == 0.0 or not self.training:
             return x
+
         keep_prob = 1 - self.drop_prob
         shape = (x.shape[0],) + (1,) * (x.ndim - 1)
         random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
@@ -38,6 +39,7 @@ class LayerNorm(nn.Module):
             x = self.weight[:, None, None] * x + self.bias[:, None, None]
             return x
 
+
 class Block(nn.Module):
     def __init__(self, dim, drop_path=0.0, layer_scale_init_value=1e-6):
         super().__init__()
@@ -48,7 +50,7 @@ class Block(nn.Module):
         self.pwconv1 = nn.Linear(dim, 4 * dim)
         self.act = nn.GELU()
         self.pwconv2 = nn.Linear(4 * dim, dim)
-        
+
         # Layer Scale
         self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim)), requires_grad=True) if layer_scale_init_value > 0 else None
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -68,14 +70,15 @@ class Block(nn.Module):
         x = input + self.drop_path(x)
         return x
 
+
 class ConvNeXtTiny(nn.Module):
     def __init__(self, in_chans=1, drop_path_rate=0.0, layer_scale_init_value=1e-6):
         super().__init__()
-        
+
         # ConvNeXt Tiny Config
         depths = [3, 3, 9, 3]
         dims = [96, 192, 384, 768]
-        
+
         self.downsample_layers = nn.ModuleList() 
         # Stem: (N, 1, H, W) -> (N, 96, H/4, W/4)
         stem = nn.Sequential(
@@ -83,7 +86,7 @@ class ConvNeXtTiny(nn.Module):
             LayerNorm(dims[0], eps=1e-6, data_format="channels_first")
         )
         self.downsample_layers.append(stem)
-        
+
         # Downsampling between stages
         for i in range(3):
             downsample_layer = nn.Sequential(
@@ -130,6 +133,7 @@ class ConvNeXtTiny(nn.Module):
 
         return x_cls, x_patch
 
+
 class DINOHead(nn.Module):
     def __init__(self, in_dim, out_dim, use_bn=False, norm_last_layer=True, 
                  nlayers=3, hidden_dim=2048, bottleneck_dim=256):
@@ -170,6 +174,7 @@ class DINOHead(nn.Module):
         x = self.last_layer(x)
         return x
 
+
 class MultiCropWrapper(nn.Module):
     """
     Standard DINO wrapper. 
@@ -187,41 +192,36 @@ class MultiCropWrapper(nn.Module):
             return self.head(cls_token), [patch_tokens], cls_token
 
         # Case 2: Input is a list of crops (training)
-        # We need to concatenate crops of the same size to maximize GPU parallelism.
-        # instead of sorting unique sizes, we find contiguous blocks of same-sized crops.
-        
         output_cls_tokens = []
         output_patch_tokens_list = []
-        
+
         start_idx = 0
         n_crops = len(x)
         current_res = x[0].shape[-1]
-        
+
         # Iterate to find boundaries where resolution changes
         # We start from 1 to check transition from i-1 to i
         for i in range(1, n_crops + 1):
             # If we reached the end or the resolution changed
             if i == n_crops or x[i].shape[-1] != current_res:
                 end_idx = i
-                
+
                 # Concatenate the contiguous block of crops
                 # shape: (Batch * n_crops_in_block, C, H, W)
                 block_input = torch.cat(x[start_idx:end_idx])
-                
+
                 # Forward pass
                 _out_cls, _out_patch = self.backbone(block_input)
-                
+
                 output_cls_tokens.append(_out_cls)
                 output_patch_tokens_list.append(_out_patch)
-                
+
                 # Prepare for next block
                 if i < n_crops:
                     start_idx = i
                     current_res = x[i].shape[-1]
 
-        # Concatenate all CLS tokens for the DINO Head (dimensions match regardless of crop size)
         output_cls = torch.cat(output_cls_tokens)
-        
+
         # Keep patch tokens separate (dimensions differ: 224->(7x7) patches, 96->(3x3) patches)
-        # Returns: (Head_Output, List_of_Patch_Tensors)
         return self.head(output_cls), output_patch_tokens_list, output_cls

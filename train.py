@@ -128,7 +128,7 @@ class Trainer:
                 continue
             
             # Check if parameter should be excluded from weight decay
-            # Standard rule: Do not decay biases or 1D tensors (LayerNorm, LayerScale)
+            # Do not decay biases or 1D tensors (LayerNorm, LayerScale)
             if param.ndim <= 1 or name.endswith(".bias"):
                 not_regularized.append(param)
             else:
@@ -182,8 +182,6 @@ class Trainer:
             # B. KoLeo Loss (Student Batch Uniformity)
             # Only apply to global views of student to save compute
             n_global = len(global_crops)
-            # student_output is concatenated (Batch * (2+8), Dim). 
-            # Split to get global parts
             student_cls_chunked = student_cls.chunk(len(all_crops))
             student_global_cls = torch.cat(student_cls_chunked[:n_global])
             loss_koleo = self.koleo_loss_fn(student_global_cls)
@@ -192,15 +190,6 @@ class Trainer:
             # Only compute between Student Global and Teacher Global
             # (Comparing 96x96 local crops to 224x224 global crops via Gram matrix is 
             # mathematically messy due to different N_patches. We stick to global-global).
-            
-            # student_patches comes out as (Total_Batch, N_patches, Dim).
-            # But wait, local crops have different N_patches than global crops!
-            # The MultiCropWrapper will fail to stack 'student_patches' if shapes differ.
-            # We need to rely on MultiCropWrapper handling lists or splitting outputs.
-            # *Correction*: In the Modeling step, MultiCropWrapper returns patches only if shapes match
-            # or we must modify it to return a list.
-            # Assuming we extract patches for global views specifically:
-            # loss_gram = self.gram_loss_fn(student_patches[:len(global_crops)*self.batch_size], teacher_patches)
             loss_gram = self.gram_loss_fn(student_patches_list[0], teacher_patches_list[0])
 
             # 5. Optimization
@@ -230,22 +219,24 @@ class Trainer:
                 'teacher': self.teacher.state_dict(),
             }, f"weights/checkpoint_{epoch}.pth")
 
+
 # Custom Collate to handle the dictionary of lists from SonarDataTransform
 def dino_collate_fn(batch):
     # batch is a list of dicts: [{'global_crops': [t1, t2], 'local_crops': [t3...]}, ...]
     output = {'global_crops': [], 'local_crops': []}
-    
+
     # We want to stack: output['global_crops'] = [Batch_Crop1, Batch_Crop2]
     n_global = len(batch[0]['global_crops'])
     n_local = len(batch[0]['local_crops'])
-    
+
     for i in range(n_global):
         output['global_crops'].append(torch.stack([item['global_crops'][i] for item in batch]))
-        
+
     for i in range(n_local):
         output['local_crops'].append(torch.stack([item['local_crops'][i] for item in batch]))
-        
+
     return output
+
 
 if __name__ == "__main__":
     os.makedirs("logs", exist_ok=True)
@@ -259,10 +250,6 @@ if __name__ == "__main__":
     )
 
     trainer = Trainer()
-    # Monkey patch the loader with the correct collate_fn and transform wrapper
-    # (Since I simplified the Dataset class earlier, we apply transform inside dataset)
-    
-    # WRAPPING LOGIC:
     original_dataset = trainer.dataset
     transform_pipeline = trainer.transform
     

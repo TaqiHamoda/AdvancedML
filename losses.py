@@ -2,12 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class DINOLoss(nn.Module):
     def __init__(self, student_temp=0.1, n_iterations=3):
         super().__init__()
         self.student_temp = student_temp
-        self.n_iterations = n_iterations  # Number of Sinkhorn iterations (usually 3)
-        # We no longer need the 'center' buffer for Sinkhorn-Knopp
+        self.n_iterations = n_iterations
 
     @torch.no_grad()
     def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp):
@@ -18,69 +18,55 @@ class DINOLoss(nn.Module):
         # teacher_output: [Batch * n_crops, out_dim]
         # Q is K-by-B for consistency with the algorithm notations
         Q = torch.exp(teacher_output / teacher_temp).t() # (out_dim, Batch_Total)
-        
-        B = Q.shape[1] # Total batch size (local)
-        K = Q.shape[0] # Number of prototypes
 
-        B_total = B 
+        K, B = Q.shape[0], Q.shape[1] # Total batch size (local)
+        Q /= torch.sum(Q)
 
-        # 1. Make the matrix sum to 1
-        sum_Q = torch.sum(Q)
-        Q /= sum_Q
-
-        # 2. Iterative normalization
         for _ in range(self.n_iterations):
             # Normalize each row: total weight per prototype must be 1/K
-            sum_of_rows = torch.sum(Q, dim=1, keepdim=True)
-            Q /= sum_of_rows
+            Q /= torch.sum(Q, dim=1, keepdim=True)
             Q /= K
 
             # Normalize each column: total weight per sample must be 1/B_total
             Q /= torch.sum(Q, dim=0, keepdim=True)
-            Q /= B_total
+            Q /= B
 
-        Q *= B_total # The columns must sum to 1 so that Q is an assignment probability
+        Q *= B # The columns must sum to 1 so that Q is an assignment probability
         return Q.t() # Return to (Batch, out_dim)
 
     def forward(self, student_output, teacher_output, teacher_temp):
         """
         Cross-entropy between softmax outputs of the teacher and student.
         """
-        # 1. Solve for Batch Size (B)
         # Teacher output is always from the 2 global crops, so Total = 2 * B
         n_teacher_crops = 2
         
-        # 2. Get Teacher Probabilities via Sinkhorn-Knopp
-        # This replaces the old centering + softmax logic
-        teacher_out = self.sinkhorn_knopp_teacher(teacher_output, teacher_temp)
-        
         # Split teacher outputs back into per-crop views for the loop
+        teacher_out = self.sinkhorn_knopp_teacher(teacher_output, teacher_temp)
         teacher_out = teacher_out.detach().chunk(n_teacher_crops)
 
-        # 3. Prepare Student Logits
-        # student_output contains Global + Local crops
+        # Student_output contains Global + Local crops
         # Split into list of tensors, where each tensor is (B, Dim)
         batch_size = teacher_output.shape[0] // n_teacher_crops
         student_out = student_output / self.student_temp
         n_student_crops = student_out.shape[0] // batch_size
         student_out = student_out.chunk(n_student_crops)
 
-        total_loss = 0
-        n_loss_terms = 0
-        
-        # 4. Compute Cross-Entropy Loop
+        # Compute cross-entropy loss between teacher and student
+        total_loss, n_loss_terms = 0, 0
         for iq, q in enumerate(teacher_out):
             for v in range(len(student_out)):
                 # Skip the case where student and teacher view the exact same image
                 if v == iq: 
                     continue
-                
+
                 # q is the target probability from teacher (after Sinkhorn)
                 # student_out[v] are the raw logits from student
                 loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
                 total_loss += loss.mean()
+
                 n_loss_terms += 1
-                
+
         return total_loss / n_loss_terms
 
 
@@ -93,9 +79,7 @@ class GramLoss(nn.Module):
         super().__init__()
         self.mse = nn.MSELoss()
 
-    def forward(self, student_patches, teacher_patches):
-        # inputs are (Batch, N_patches, Dim)
-        
+    def forward(self, student_patches, teacher_patches):        
         # Normalize to ensure stability
         student_patches = F.normalize(student_patches, dim=-1)
         teacher_patches = F.normalize(teacher_patches, dim=-1)
@@ -127,17 +111,11 @@ class KoLeoLoss(nn.Module):
         
         # Compute pairwise distances
         dists_matrix = torch.cdist(x, x)
-        
-        # --- FIX IS HERE ---
-        # We must clone the matrix before modifying it in-place.
-        # This keeps the original 'dists_matrix' intact for the backward pass of cdist.
         dists_matrix = dists_matrix.clone()
         dists_matrix.fill_diagonal_(float('inf'))
-        # -------------------
-        
-        # Find distance to nearest neighbor for each point
+
+        # Find distance to nearest neighbor for each point and maximize the entropy
         min_dists, _ = torch.min(dists_matrix, dim=1)
-        
-        # Maximize entropy
         loss = -torch.log(min_dists + self.eps).mean()
+
         return loss
