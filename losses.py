@@ -3,19 +3,47 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class DINOLoss(nn.Module):
-    def __init__(self, out_dim, teacher_temp=0.04, student_temp=0.1, center_momentum=0.9):
+    def __init__(self, out_dim, teacher_temp=0.04, student_temp=0.1, n_iterations=3):
         super().__init__()
         self.student_temp = student_temp
         self.teacher_temp = teacher_temp
-        self.center_momentum = center_momentum
-        self.register_buffer("center", torch.zeros(1, out_dim))
+        self.n_iterations = n_iterations  # Number of Sinkhorn iterations (usually 3)
+        # We no longer need the 'center' buffer for Sinkhorn-Knopp
 
     @torch.no_grad()
-    def update_center(self, teacher_output):
-        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
-        # If distributed, dist.all_reduce(batch_center)
-        batch_center = batch_center / len(teacher_output)
-        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
+    def sinkhorn_knopp_teacher(self, teacher_output):
+        """
+        Applies Sinkhorn-Knopp normalization to the teacher output.
+        This enforces a uniform distribution of the teacher's output across the batch.
+        """
+        teacher_temp = self.teacher_temp
+        
+        # teacher_output: [Batch * n_crops, out_dim]
+        # Q is K-by-B for consistency with the algorithm notations
+        Q = torch.exp(teacher_output / teacher_temp).t() # (out_dim, Batch_Total)
+        
+        B = Q.shape[1] # Total batch size (local)
+        K = Q.shape[0] # Number of prototypes
+
+        B_total = B 
+
+        # 1. Make the matrix sum to 1
+        sum_Q = torch.sum(Q)
+        Q /= sum_Q
+
+        # 2. Iterative normalization
+        for _ in range(self.n_iterations):
+            # Normalize each row: total weight per prototype must be 1/K
+            sum_of_rows = torch.sum(Q, dim=1, keepdim=True)
+            Q /= sum_of_rows
+            Q /= K
+
+            # Normalize each column: total weight per sample must be 1/B_total
+            Q /= torch.sum(Q, dim=0, keepdim=True)
+            Q /= B_total
+
+        Q *= B_total # The columns must sum to 1 so that Q is an assignment probability
+        return Q.t() # Return to (Batch, out_dim)
 
     def forward(self, student_output, teacher_output):
         """
@@ -24,19 +52,21 @@ class DINOLoss(nn.Module):
         # 1. Solve for Batch Size (B)
         # Teacher output is always from the 2 global crops, so Total = 2 * B
         n_teacher_crops = 2
-        batch_size = teacher_output.shape[0] // n_teacher_crops
         
-        # 2. Prepare Student Logits
+        # 2. Get Teacher Probabilities via Sinkhorn-Knopp
+        # This replaces the old centering + softmax logic
+        teacher_out = self.sinkhorn_knopp_teacher(teacher_output)
+        
+        # Split teacher outputs back into per-crop views for the loop
+        teacher_out = teacher_out.detach().chunk(n_teacher_crops)
+
+        # 3. Prepare Student Logits
+        # student_output contains Global + Local crops
         # Split into list of tensors, where each tensor is (B, Dim)
+        batch_size = teacher_output.shape[0] // n_teacher_crops
         student_out = student_output / self.student_temp
         n_student_crops = student_out.shape[0] // batch_size
         student_out = student_out.chunk(n_student_crops)
-
-        # 3. Prepare Teacher Probabilities
-        # Split into list of tensors, where each tensor is (B, Dim)
-        temp = self.teacher_temp
-        teacher_out = F.softmax((teacher_output - self.center) / temp, dim=-1)
-        teacher_out = teacher_out.detach().chunk(n_teacher_crops)
 
         total_loss = 0
         n_loss_terms = 0
@@ -48,12 +78,12 @@ class DINOLoss(nn.Module):
                 if v == iq: 
                     continue
                 
-                # q: (B, Dim), student_out[v]: (B, Dim) -> Loss is valid
+                # q is the target probability from teacher (after Sinkhorn)
+                # student_out[v] are the raw logits from student
                 loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
                 total_loss += loss.mean()
                 n_loss_terms += 1
                 
-        self.update_center(teacher_output)
         return total_loss / n_loss_terms
 
 
@@ -77,6 +107,10 @@ class GramLoss(nn.Module):
         # This represents the relationship between every spatial location and every other location.
         student_gram = torch.bmm(student_patches, student_patches.transpose(1, 2))
         teacher_gram = torch.bmm(teacher_patches, teacher_patches.transpose(1, 2))
+
+        # We clamp negative values to 0. We don't care if features are opposites. Only match positive patterns
+        student_gram = student_gram.clamp(min=0)
+        teacher_gram = teacher_gram.clamp(min=0)
 
         # We only want to match the upper triangle to avoid redundancy, but MSE on full matrix is fine/easier
         return self.mse(student_gram, teacher_gram)

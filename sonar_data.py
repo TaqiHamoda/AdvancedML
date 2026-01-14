@@ -1,10 +1,13 @@
 import glob
 import os
 import numpy as np
+import logging
 
 import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import v2
+
+logger = logging.getLogger(__name__)
 
 
 class ClampTransform(torch.nn.Module):
@@ -36,7 +39,7 @@ class SonarDataset(Dataset):
         self.files = sorted(glob.glob(os.path.join(data_dir, ext)))
         if len(self.files) == 0:
             raise ValueError(f"No files found in {data_dir} with extension {ext}")
-        print(f"Found {len(self.files)} sonar tiles.")
+        logger.info(f"Found {len(self.files)} sonar tiles.")
 
     def __len__(self):
         return len(self.files)

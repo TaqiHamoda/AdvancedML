@@ -1,9 +1,10 @@
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
+import numpy as np
 import logging
 from tqdm import tqdm
-import time
+import os, time
 
 # Import your modules
 from sonar_data import SonarDataset, SonarDataTransform
@@ -11,6 +12,21 @@ from dino import ConvNeXtTiny, DINOHead, MultiCropWrapper
 from losses import DINOLoss, GramLoss, KoLeoLoss
 
 logger = logging.getLogger(__name__)
+
+
+def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epochs=0, start_warmup_value=0):
+    warmup_schedule = np.array([])
+    warmup_iters = warmup_epochs * niter_per_ep
+    if warmup_epochs > 0:
+        warmup_schedule = np.linspace(start_warmup_value, base_value, warmup_iters)
+
+    iters = np.arange(epochs * niter_per_ep - warmup_iters)
+    schedule = final_value + 0.5 * (base_value - final_value) * (1 + np.cos(np.pi * iters / len(iters)))
+
+    schedule = np.concatenate((warmup_schedule, schedule))
+    assert len(schedule) == epochs * niter_per_ep
+    return schedule
+
 
 class Trainer:
     def __init__(self):
@@ -20,8 +36,10 @@ class Trainer:
         # --- Hyperparameters ---
         self.batch_size = 32 # Adjust based on your GPU memory (32GB can likely handle 64+)
         self.base_lr = 0.0005
+        self.min_lr = 1e-6
         self.weight_decay = 0.04
         self.epochs = 100
+        self.warmup_epochs = 10
         self.momentum_teacher = 0.996 # Standard DINO EMA
         
         # Loss Weights
@@ -39,6 +57,16 @@ class Trainer:
             num_workers=8, 
             pin_memory=True,
             drop_last=True
+        )
+
+        # --- Scheduler Setup ---
+        self.lr_schedule = cosine_scheduler(
+            base_value=self.base_lr,
+            final_value=self.min_lr,
+            epochs=self.epochs,
+            niter_per_ep=len(self.loader),
+            warmup_epochs=self.warmup_epochs,
+            start_warmup_value=0, # Start from 0 to prevent instability
         )
 
         # --- Models ---
@@ -65,12 +93,37 @@ class Trainer:
         self.gram_loss_fn = GramLoss().to(self.device)
         self.koleo_loss_fn = KoLeoLoss().to(self.device)
 
-        # --- Optimizer ---
+        # --- Optimizer with Weight Decay Exclusion ---
         self.optimizer = optim.AdamW(
-            self.student.parameters(), 
+            self.get_params_groups(self.student),
             lr=self.base_lr, 
-            weight_decay=self.weight_decay
+            weight_decay=self.weight_decay 
         )
+
+    def get_params_groups(self, model):
+        """
+        Separates parameters into two groups:
+        1. Regularized (Weight Decay > 0): Conv/Linear weights (ndim >= 2)
+        2. Not Regularized (Weight Decay = 0): Biases, LayerNorms, Gammas (ndim < 2)
+        """
+        regularized = []
+        not_regularized = []
+
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            
+            # Check if parameter should be excluded from weight decay
+            # Standard rule: Do not decay biases or 1D tensors (LayerNorm, LayerScale)
+            if param.ndim <= 1 or name.endswith(".bias"):
+                not_regularized.append(param)
+            else:
+                regularized.append(param)
+
+        return [
+            {'params': regularized, 'weight_decay': self.weight_decay},
+            {'params': not_regularized, 'weight_decay': 0.0}
+        ]
 
     def update_teacher_ema(self):
         # Apply EMA: teacher = m * teacher + (1 - m) * student
@@ -83,25 +136,12 @@ class Trainer:
         total_loss = 0
         
         for i, batch_imgs in enumerate(self.loader):
-            # Apply transforms on the fly
-            # Note: Transformations are usually done in Dataset.__getitem__, 
-            # but DINO needs multi-crop logic. 
-            # Since our Dataset returns raw tensors, we apply the dict-returning transform here.
-            # Ideally, move 'transform' into the Dataset class, but doing it here allows 
-            # easy visualization of raw data if needed.
+            it = len(self.loader) * epoch_index + i
             
-            # Since DataLoader collates inputs, we need to apply transform to each item
-            # Use a custom collate_fn or apply loop here. 
-            # For efficiency, let's assume the transform is inside the Dataset (Update below).
-            pass 
-            
-            # Correction: Let's adjust the logic. The Dataset should return the dictionary of crops.
-            # I will assume we wrapped the dataset with the transform properly.
-            
-            # STRUCTURE IF TRANSFORM IS IN DATASET:
-            # batch_imgs is a list of lists of tensors? No, default collate stacks them.
-            # DINO transforms return a dict of lists. Custom collate needed.
-            # Let's handle the loop inputs carefully:
+            # Get specific LR for this step
+            current_lr = self.lr_schedule[it]
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = current_lr
             
             # 1. Unpack data
             # Assuming custom collate was used or manual list handling
@@ -162,7 +202,7 @@ class Trainer:
             
             if i % 10 == 0:
                 logger.info(f"Epoch {epoch_index} [{i}/{len(self.loader)}] "
-                      f"Loss: {loss.item():.4f} (D:{loss_dino:.3f} G:{loss_gram:.3f} K:{loss_koleo:.3f})")
+                      f"lr: {current_lr:.6f}, Loss: {loss.item():.4f} (D:{loss_dino:.3f} G:{loss_gram:.3f} K:{loss_koleo:.3f})")
 
     def run(self):
         logger.info("Starting training...")
@@ -193,6 +233,9 @@ def dino_collate_fn(batch):
     return output
 
 if __name__ == "__main__":
+    os.makedirs("logs", exist_ok=True)
+    os.makedirs("weights", exist_ok=True)
+
     logging.basicConfig(
         format='%(asctime)s - %(name)s - [%(levelname)s]: %(message)s',
         datefmt='%m/%d/%Y %I:%M:%S %p',
