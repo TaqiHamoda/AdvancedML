@@ -40,6 +40,10 @@ class Trainer:
         self.weight_decay = 0.04
         self.epochs = 100
         self.warmup_epochs = 10
+
+        self.teacher_temp_start = 0.04
+        self.teacher_temp_end = 0.07
+        self.teacher_temp_warmup_epochs = 30
         self.momentum_teacher = 0.996 # Standard DINO EMA
         
         # Loss Weights
@@ -53,10 +57,20 @@ class Trainer:
         self.loader = DataLoader(
             self.dataset, 
             batch_size=self.batch_size, 
-            shuffle=True, 
-            num_workers=8, 
+            shuffle=True,
+            num_workers=16,
             pin_memory=True,
             drop_last=True
+        )
+
+        # --- Teacher Temp Schedule ---
+        self.teacher_temp_schedule = cosine_scheduler(
+            base_value=self.teacher_temp_start,
+            final_value=self.teacher_temp_end,
+            epochs=self.epochs,
+            niter_per_ep=len(self.loader),
+            warmup_epochs=self.teacher_temp_warmup_epochs,
+            start_warmup_value=self.teacher_temp_start, # Usually starts at base value
         )
 
         # --- Scheduler Setup ---
@@ -89,7 +103,7 @@ class Trainer:
         self.teacher.load_state_dict(self.student.state_dict())
 
         # --- Losses ---
-        self.dino_loss_fn = DINOLoss(out_dim=65536).to(self.device)
+        self.dino_loss_fn = DINOLoss().to(self.device)
         self.gram_loss_fn = GramLoss().to(self.device)
         self.koleo_loss_fn = KoLeoLoss().to(self.device)
 
@@ -151,26 +165,27 @@ class Trainer:
             # 2. Teacher Forward (Global Crops only)
             with torch.no_grad():
                 # teacher_patches_list is [Tensor(Batch*2, 196, 768)]
-                teacher_output, teacher_patches_list = self.teacher(global_crops) 
+                teacher_output, teacher_patches_list, _ = self.teacher(global_crops) 
             
             # 3. Student Forward (All Crops)
             # student_patches_list is [Tensor(Global), Tensor(Local)]
             all_crops = global_crops + local_crops
-            student_output, student_patches_list = self.student(all_crops)
+            student_output, student_patches_list, student_cls = self.student(all_crops)
             
             # 4. Calculate Losses
             
             # A. DINO Loss (CLS token matching)
             # Student output contains all crops. Teacher only global.
-            loss_dino = self.dino_loss_fn(student_output, teacher_output)
+            current_teacher_temp = self.teacher_temp_schedule[it]
+            loss_dino = self.dino_loss_fn(student_output, teacher_output, current_teacher_temp)
             
             # B. KoLeo Loss (Student Batch Uniformity)
             # Only apply to global views of student to save compute
             n_global = len(global_crops)
             # student_output is concatenated (Batch * (2+8), Dim). 
             # Split to get global parts
-            student_out_chunked = student_output.chunk(len(all_crops))
-            student_global_cls = torch.cat(student_out_chunked[:n_global])
+            student_cls_chunked = student_cls.chunk(len(all_crops))
+            student_global_cls = torch.cat(student_cls_chunked[:n_global])
             loss_koleo = self.koleo_loss_fn(student_global_cls)
             
             # C. Gram Loss (Patch Texture Matching)

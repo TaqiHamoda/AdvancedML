@@ -184,7 +184,7 @@ class MultiCropWrapper(nn.Module):
         # Case 1: Input is a single tensor (e.g., validation or standard forward)
         if not isinstance(x, list):
             cls_token, patch_tokens = self.backbone(x)
-            return self.head(cls_token), [patch_tokens]
+            return self.head(cls_token), [patch_tokens], cls_token
 
         # Case 2: Input is a list of crops (training)
         # We need to concatenate crops of the same size to maximize GPU parallelism.
@@ -224,4 +224,4 @@ class MultiCropWrapper(nn.Module):
         
         # Keep patch tokens separate (dimensions differ: 224->(7x7) patches, 96->(3x3) patches)
         # Returns: (Head_Output, List_of_Patch_Tensors)
-        return self.head(output_cls), output_patch_tokens_list
+        return self.head(output_cls), output_patch_tokens_list, output_cls

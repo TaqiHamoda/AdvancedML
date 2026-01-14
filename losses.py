@@ -3,21 +3,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class DINOLoss(nn.Module):
-    def __init__(self, out_dim, teacher_temp=0.04, student_temp=0.1, n_iterations=3):
+    def __init__(self, student_temp=0.1, n_iterations=3):
         super().__init__()
         self.student_temp = student_temp
-        self.teacher_temp = teacher_temp
         self.n_iterations = n_iterations  # Number of Sinkhorn iterations (usually 3)
         # We no longer need the 'center' buffer for Sinkhorn-Knopp
 
     @torch.no_grad()
-    def sinkhorn_knopp_teacher(self, teacher_output):
+    def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp):
         """
         Applies Sinkhorn-Knopp normalization to the teacher output.
         This enforces a uniform distribution of the teacher's output across the batch.
-        """
-        teacher_temp = self.teacher_temp
-        
+        """        
         # teacher_output: [Batch * n_crops, out_dim]
         # Q is K-by-B for consistency with the algorithm notations
         Q = torch.exp(teacher_output / teacher_temp).t() # (out_dim, Batch_Total)
@@ -45,7 +42,7 @@ class DINOLoss(nn.Module):
         Q *= B_total # The columns must sum to 1 so that Q is an assignment probability
         return Q.t() # Return to (Batch, out_dim)
 
-    def forward(self, student_output, teacher_output):
+    def forward(self, student_output, teacher_output, teacher_temp):
         """
         Cross-entropy between softmax outputs of the teacher and student.
         """
@@ -55,7 +52,7 @@ class DINOLoss(nn.Module):
         
         # 2. Get Teacher Probabilities via Sinkhorn-Knopp
         # This replaces the old centering + softmax logic
-        teacher_out = self.sinkhorn_knopp_teacher(teacher_output)
+        teacher_out = self.sinkhorn_knopp_teacher(teacher_output, teacher_temp)
         
         # Split teacher outputs back into per-crop views for the loop
         teacher_out = teacher_out.detach().chunk(n_teacher_crops)
