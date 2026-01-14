@@ -1,11 +1,15 @@
 import glob
 import os
-import random
 import numpy as np
 
 import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import v2
+
+
+class ClampTransform(torch.nn.Module):
+    def forward(self, img):
+        return torch.clamp(img, 0, 1)
 
 class GaussianNoise(torch.nn.Module):
     """Adds Gaussian noise to the tensor to simulate sonar speckle/electronic noise."""
@@ -94,6 +98,7 @@ class SonarDataTransform:
             v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.2),
             # Custom Gaussian Noise for speckle robustness
             GaussianNoise(sigma=0.05, p=0.5), 
+            ClampTransform(),
             # Normalize inputs (centering around 0 for neural net stability)
             # Assuming [0,1] input, (x - 0.5)/0.5 puts data in [-1, 1]
             v2.Normalize(mean=[0.5], std=[0.5]), 
