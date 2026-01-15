@@ -75,7 +75,7 @@ class Trainer:
         self.min_lr = 1e-6
         self.weight_decay = 0.04
         self.epochs = 100
-        self.warmup_epochs = self.epochs // 2
+        self.warmup_epochs = self.epochs // 10
 
         self.teacher_temp_start = 0.04
         self.teacher_temp_end = 0.07
