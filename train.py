@@ -109,8 +109,8 @@ class Trainer:
             batch_size=self.batch_size, 
             shuffle=(self.sampler is None), # Shuffle handled by sampler if DDP
             sampler=self.sampler,
-            num_workers=0, # Decrease workers per GPU
-            pin_memory=False,
+            num_workers=16,
+            pin_memory=True,
             drop_last=True,
             collate_fn=dino_collate_fn
         )
@@ -254,12 +254,12 @@ class Trainer:
 
                 # iBOT Loss (Patch tokens)
                 # Select only the global crop patches from student output (first 2 items)
-                s_global_patches = torch.cat(student_patches_list[:2], dim=0) # (2*B, N, D)
+                s_global_patches = student_patches_list[0]
                 s_ibot_out = self.student_ibot_head(s_global_patches)   # (2*B, N, K)
                 loss_ibot = self.ibot_loss_fn(
-                    s_ibot_out, 
-                    t_ibot_out, 
-                    masks, # Pass the boolean mask
+                    s_ibot_out,
+                    t_ibot_out,
+                    masks,
                     current_teacher_temp
                 )
 
@@ -293,11 +293,20 @@ class Trainer:
             # Log only on Master
             if self.rank == 0 and i % 10 == 0:
                 logger.info(f"Epoch {epoch_index} [{i}/{len(self.loader)}] "
-                      f"lr: {current_lr:.6f}, Loss: {loss.item():.4f}")
+                      f"lr: {current_lr:.6f}, Loss: {loss.item():.4f} "
+                      f"(DINO: {loss_dino.item():.4f}, IBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f})")
+
+            # Manually delete heavy tensors to free VRAM for the next iteration
+            del loss, loss_dino, loss_ibot, loss_gram, loss_koleo
+            del student_output, teacher_output
+            del s_ibot_out, t_ibot_out
+            del global_crops, local_crops, masks
+
+            torch.cuda.empty_cache()
 
     def run(self):
         if self.rank == 0:
-            logger.info(f"Model collapse loss value: ln({self.output_dim}) = {np.log(self.output_dim):.2f}")
+            logger.info(f"Model collapse happens at DINO loss value: ln({self.output_dim}) ~ {np.log(self.output_dim):.2f}")
             logger.info("Starting training...")
         
         # Use simple range, tqdm only on master to avoid messed up bars
