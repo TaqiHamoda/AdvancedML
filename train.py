@@ -70,7 +70,7 @@ class Trainer:
 
         # --- Hyperparameters ---
         self.output_dim = 1024  # Original 65536 vector is too large for our batch size
-        self.batch_size = 64  # Per GPU
+        self.batch_size = 85  # Per GPU
         self.base_lr = 0.0005 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
         self.min_lr = 1e-6
         self.weight_decay = 0.04
@@ -314,8 +314,9 @@ class Trainer:
             # Log only on Master
             if self.rank == 0 and i % 10 == 0:
                 logger.info(f"Epoch {epoch_index} [{i}/{len(self.loader)}] "
-                      f"lr: {current_lr:.6f}, Loss: {loss.item():.4f} "
-                      f"(DINO: {loss_dino.item():.4f}, IBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f})")
+                      f"lr: {current_lr:.6f}, temp: {self.teacher_temp_schedule[it]:.4f}, "
+                      f"m: {self.momentum_schedule[it]:.4f}, wd: {self.wd_schedule[it]:.4f} "
+                      f"DINO: {loss_dino.item():.4f}, IBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
 
             # Manually delete heavy tensors to free VRAM for the next iteration
             del loss, loss_dino, loss_ibot, loss_gram, loss_koleo
