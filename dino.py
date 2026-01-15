@@ -160,7 +160,7 @@ class DINOHead(nn.Module):
         # The last layer (prototypes) requires Weight Normalization in DINO
         self.last_layer = nn.utils.parametrizations.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
         with torch.no_grad():
-            self.last_layer.parametrizations.weight.original0.fill_(1)
+            self.last_layer.parametrizations.weight.original0.fill_(1)  # original0 is magnitude. original1 is direction
             if norm_last_layer:
                 self.last_layer.parametrizations.weight.original0.requires_grad = False
 
