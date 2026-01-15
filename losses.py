@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 class DINOLoss(nn.Module):
-    def __init__(self, out_dim, student_temp=0.1, n_iterations=3, center_momentum=0.999):
+    def __init__(self, out_dim, student_temp=0.1, n_iterations=3, center_momentum=0.9):
         super().__init__()
         self.student_temp = student_temp
         self.n_iterations = n_iterations
@@ -82,6 +82,54 @@ class DINOLoss(nn.Module):
 
         self.update_center(teacher_output)
         return total_loss / n_loss_terms
+
+
+class iBOTPatchLoss(nn.Module):
+    def __init__(self, out_dim, student_temp=0.1, center_momentum=0.9):
+        super().__init__()
+        self.student_temp = student_temp
+        self.center_momentum = center_momentum
+        self.register_buffer("center", torch.zeros(1, out_dim))
+
+    @torch.no_grad()
+    def update_center(self, teacher_output):
+        # teacher_output shape: (Batch * Masked_Patches, Dim)
+        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
+        if dist.is_initialized():
+            dist.all_reduce(batch_center)
+            batch_center = batch_center / (len(teacher_output) * dist.get_world_size())
+        else:
+            batch_center = batch_center / len(teacher_output)
+        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
+
+    def forward(self, student_patches, teacher_patches, student_masks_flat, teacher_temp):
+        """
+        student_patches: (B, N, K)
+        teacher_patches: (B, N, K)
+        student_masks_flat: (B, N) - Boolean mask where True indicates MASKED
+        """
+        # 1. Flatten tensors
+        s_patches = student_patches.flatten(0, 1) # (B*N, K)
+        t_patches = teacher_patches.flatten(0, 1) # (B*N, K)
+        mask = student_masks_flat.flatten().bool()
+
+        # 2. Select only the MASKED patches
+        # Student sees mask -> predicts masked content
+        # Teacher sees full img -> provides target
+        s_masked = s_patches[mask]
+        t_masked = t_patches[mask]
+        
+        if len(t_masked) == 0:
+            return torch.tensor(0.0, device=student_patches.device)
+
+        # 3. Compute Cross Entropy
+        s_logits = s_masked / self.student_temp
+        t_probs = F.softmax((t_masked - self.center) / teacher_temp, dim=-1).detach()
+
+        loss = torch.sum(-t_probs * F.log_softmax(s_logits, dim=-1), dim=-1).mean()
+
+        self.update_center(t_masked)
+        return loss
 
 
 class GramLoss(nn.Module):

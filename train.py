@@ -4,15 +4,17 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+import torch.nn.functional as F
+
 import numpy as np
 import logging
 from tqdm import tqdm
 import os, time
 
 # Import your modules
-from sonar_data import SonarDataset, SonarDataTransform
+from sonar_data import MaskingGenerator, SonarDataset, SonarDataTransform
 from dino import ConvNeXtTiny, DINOHead, MultiCropWrapper
-from losses import DINOLoss, GramLoss, KoLeoLoss
+from losses import DINOLoss, iBOTPatchLoss, GramLoss, KoLeoLoss
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +81,12 @@ class Trainer:
         self.teacher_momentum = 0.996
         
         self.w_dino = 1.0
+        self.w_ibot = 1.0
         self.w_gram = 1.0
         self.w_koleo = 0.1
         
-        # --- Data & Sampler ---
+        # --- Masking, Data & Sampler ---
+        self.mask_generator = MaskingGenerator(input_size=(224, 224), patch_size=32, mask_ratio=0.5)
         dataset = SonarDataset(data_dir="./dataset", ext="*.npy")
         transform = SonarDataTransform(local_crops_number=8)
         
@@ -147,19 +151,33 @@ class Trainer:
             p.requires_grad = False
         self.teacher.load_state_dict(self.student.state_dict())
 
+        # 2. Add iBOT Heads (Separate from DINO Head)
+        # They project patch tokens (embed_dim) -> prototypes (output_dim)
+        student_ibot_head = DINOHead(embed_dim, out_dim=self.output_dim)
+        teacher_ibot_head = DINOHead(embed_dim, out_dim=self.output_dim)
+
+        self.student_ibot_head = student_ibot_head.to(self.device)
+        self.teacher_ibot_head = teacher_ibot_head.to(self.device)
+        teacher_ibot_head.load_state_dict(student_ibot_head.state_dict())
+        for p in self.teacher_ibot_head.parameters(): p.requires_grad = False
+
         # --- DDP Wrapping ---
         if self.is_distributed:
             # Wrap student. Teacher is NOT wrapped (no gradients).
             self.student = DDP(self.student, device_ids=[self.local_rank])
+            self.student_ibot_head = DDP(self.student_ibot_head, device_ids=[self.local_rank])
 
         # --- Losses ---
         self.dino_loss_fn = DINOLoss(out_dim=self.output_dim).to(self.device)
+        self.ibot_loss_fn = iBOTPatchLoss(out_dim=self.output_dim).to(self.device)
         self.gram_loss_fn = GramLoss().to(self.device)
         self.koleo_loss_fn = KoLeoLoss().to(self.device)
 
         # --- Optimizer ---
+        params_to_optimize = self.get_params_groups(self.student)
+        params_to_optimize += self.get_params_groups(self.student_ibot_head)
         self.optimizer = optim.AdamW(
-            self.get_params_groups(self.student), # Works with DDP wrapped module
+            params_to_optimize,
             lr=self.base_lr, 
             weight_decay=self.weight_decay 
         )
@@ -169,7 +187,7 @@ class Trainer:
         not_regularized = []
         for name, param in model.named_parameters():
             if not param.requires_grad: continue
-            if param.ndim <= 1 or name.endswith(".bias"):
+            if param.ndim <= 1 or name.endswith(".bias") or "last_layer" in name:
                 not_regularized.append(param)
             else:
                 regularized.append(param)
@@ -180,10 +198,7 @@ class Trainer:
         with torch.no_grad():
             m = self.teacher_momentum
             # Unwrap DDP student for EMA update to avoid name mismatch
-            student_model = self.student.module if self.is_distributed else self.student
             
-            for param_q, param_k in zip(student_model.parameters(), self.teacher.parameters()):
-                param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
 
     def train_one_epoch(self, epoch_index):
         # CRITICAL: Set epoch for sampler shuffling
@@ -200,24 +215,67 @@ class Trainer:
             
             global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['global_crops']]
             local_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['local_crops']]
+
+            # --- 1. GENERATE MASKS (On CPU or GPU) ---
+            # We only mask global crops for iBOT.
+            # Mask shape: (B, N_patches)
+            B = global_crops[0].shape[0]
+            masks_list = []
+            for _ in range(B * 2): # 2 global crops per image
+                m = self.mask_generator()
+                masks_list.append(torch.from_numpy(m).bool())
+            masks = torch.stack(masks_list).to(self.device) # (2*B, N_patches)
+
+            # --- 2. APPLY MASKS TO STUDENT IMAGES ---
+            # We need to upsample the mask from (7x7) to (224x224) to zero out pixels
+            # ConvNeXt stride is 32.
+            mask_grid_h = 224 // 32 
+            mask_grid_w = 224 // 32
             
+            # Reshape to (2*B, 1, 7, 7)
+            masks_spatial = masks.view(-1, 1, mask_grid_h, mask_grid_w)
+            # Upsample nearest neighbor to (2*B, 1, 224, 224)
+            masks_upsampled = F.interpolate(masks_spatial.float(), size=(224, 224), mode='nearest')
+            
+            # Create masked input for student
+            # We concatenate the two global lists to batch process
+            global_concat = torch.cat(global_crops, dim=0) # (2*B, 1, 224, 224)
+            masked_global_inputs = global_concat * (1 - masks_upsampled) # Zero out masked areas
+
             with torch.amp.autocast('cuda'):
                 with torch.no_grad():
-                    teacher_output, teacher_patches_list, _ = self.teacher(global_crops) 
-                
-                all_crops = global_crops + local_crops
-                student_output, student_patches_list, student_cls = self.student(all_crops)
-                
+                    teacher_output, teacher_patches_list, _ = self.teacher(global_crops)
+                    t_patches = torch.cat(teacher_patches_list, dim=0) # (2*B, N, D)
+                    t_ibot_out = self.teacher_ibot_head(t_patches) # (2*B, N, K)
+
+                # STUDENT: Sees MASKED Global + FULL Local
+                # We need to reconstruct the list for MultiCropWrapper
+                masked_global_list = torch.chunk(masked_global_inputs, 2, dim=0)
+                all_student_crops = list(masked_global_list) + local_crops
+
+                student_output, student_patches_list, student_cls = self.student(all_student_crops)
+
                 current_teacher_temp = self.teacher_temp_schedule[it]
                 loss_dino = self.dino_loss_fn(student_output, teacher_output, current_teacher_temp)
-                
+
+                # iBOT Loss (Patch tokens)
+                # Select only the global crop patches from student output (first 2 items)
+                s_global_patches = torch.cat(student_patches_list[:2], dim=0) # (2*B, N, D)
+                s_ibot_out = self.student_ibot_head(s_global_patches)   # (2*B, N, K)
+                loss_ibot = self.ibot_loss_fn(
+                    s_ibot_out, 
+                    t_ibot_out, 
+                    masks, # Pass the boolean mask
+                    current_teacher_temp
+                )
+
                 n_global = len(global_crops)
-                student_cls_chunked = student_cls.chunk(len(all_crops))
+                student_cls_chunked = student_cls.chunk(len(all_student_crops))
                 student_global_cls = torch.cat(student_cls_chunked[:n_global])
                 loss_koleo = self.koleo_loss_fn(student_global_cls)
-                
+
                 loss_gram = self.gram_loss_fn(student_patches_list[0], teacher_patches_list[0])
-                loss = (self.w_dino * loss_dino) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)
+                loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)
 
             # Optimization outside autocast
             self.optimizer.zero_grad(set_to_none=True)
@@ -228,6 +286,17 @@ class Trainer:
             self.scaler.update()
             
             self.update_teacher_ema()
+
+            with torch.no_grad():
+                m = self.teacher_momentum
+
+                student_model = self.student.module if self.is_distributed else self.student
+                for param_q, param_k in zip(student_model.parameters(), self.teacher.parameters()):
+                    param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
+
+                student_ibot_head = self.student_ibot_head.module if self.is_distributed else self.student_ibot_head
+                for p_s, p_t in zip(student_ibot_head.parameters(), self.teacher_ibot_head.parameters()):
+                    p_t.data.mul_(m).add_((1 - m) * p_s.detach().data)
 
             # Log only on Master
             if self.rank == 0 and i % 10 == 0:

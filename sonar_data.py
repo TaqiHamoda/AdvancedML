@@ -29,6 +29,29 @@ class GaussianNoise(torch.nn.Module):
         return img
 
 
+class MaskingGenerator:
+    def __init__(
+        self,
+        input_size=(224, 224), # Global crop size
+        patch_size=32,         # ConvNeXt Tiny stride (final feature map resolution)
+        mask_ratio=0.5,        # 50% masking is standard for iBOT
+    ):
+        self.height, self.width = input_size
+        self.patch_size = patch_size
+        self.num_patches_h = self.height // patch_size
+        self.num_patches_w = self.width // patch_size
+        self.num_patches = self.num_patches_h * self.num_patches_w
+        self.num_mask = int(mask_ratio * self.num_patches)
+
+    def __call__(self):
+        mask = np.hstack([
+            np.zeros(self.num_patches - self.num_mask),
+            np.ones(self.num_mask),
+        ])
+        np.random.shuffle(mask)
+        return mask # (N_patches, ) 0=Keep, 1=Mask
+
+
 class SonarDataset(Dataset):
     """
     Loads pre-processed .npy sonar tiles.
