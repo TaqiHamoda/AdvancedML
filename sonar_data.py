@@ -81,7 +81,7 @@ class MaskingGenerator:
     def __call__(self):
         mask = np.zeros(shape=(self.height, self.width), dtype=int)
         mask_count = 0
-        
+
         # Repeatedly add blocks until we reach the target mask ratio
         while mask_count < self.num_masking_patches:
             max_mask_patches = self.num_masking_patches - mask_count
@@ -101,7 +101,7 @@ class MaskingGenerator:
                                        replace=False)
              mask_flat[to_add] = 1
              mask = mask_flat.reshape((self.height, self.width))
-            
+
         return mask.flatten() # Returns (N_patches,) for compatibility with your training loop
 
 

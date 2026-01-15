@@ -44,9 +44,11 @@ class LayerNorm(nn.Module):
 class Block(nn.Module):
     def __init__(self, dim, drop_path=0.0, layer_scale_init_value=1e-6):
         super().__init__()
+
         # Depthwise conv: groups=dim
         self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)
         self.norm = LayerNorm(dim, eps=1e-6)
+
         # Pointwise convs implemented as Linear (1x1 conv)
         self.pwconv1 = nn.Linear(dim, 4 * dim)
         self.act = nn.GELU()
@@ -136,27 +138,29 @@ class ConvNeXtTiny(nn.Module):
 
 
 class DINOHead(nn.Module):
-    def __init__(self, in_dim, out_dim, use_bn=False, norm_last_layer=True, 
-                 nlayers=3, hidden_dim=2048, bottleneck_dim=256):
+    def __init__(self, in_dim, out_dim, use_bn=False, norm_last_layer=True, nlayers=3, hidden_dim=2048, bottleneck_dim=256):
         super().__init__()
         nlayers = max(nlayers, 1)
+
         if nlayers == 1:
             self.mlp = nn.Linear(in_dim, bottleneck_dim)
         else:
             layers = [nn.Linear(in_dim, hidden_dim)]
             if use_bn:
                 layers.append(nn.BatchNorm1d(hidden_dim))
+
             layers.append(nn.GELU())
             for _ in range(nlayers - 2):
                 layers.append(nn.Linear(hidden_dim, hidden_dim))
                 if use_bn:
                     layers.append(nn.BatchNorm1d(hidden_dim))
                 layers.append(nn.GELU())
+
             layers.append(nn.Linear(hidden_dim, bottleneck_dim))
             self.mlp = nn.Sequential(*layers)
 
         self.apply(self._init_weights)
-        
+
         # The last layer (prototypes) requires Weight Normalization in DINO
         self.last_layer = nn.utils.parametrizations.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
         with torch.no_grad():

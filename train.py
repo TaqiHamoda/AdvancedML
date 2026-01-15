@@ -18,6 +18,7 @@ from losses import DINOLoss, iBOTPatchLoss, GramLoss, KoLeoLoss
 
 logger = logging.getLogger(__name__)
 
+
 def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epochs=0, start_warmup_value=0):
     warmup_schedule = np.array([])
     warmup_iters = warmup_epochs * niter_per_ep
@@ -30,6 +31,7 @@ def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epoch
     schedule = np.concatenate((warmup_schedule, schedule))
     assert len(schedule) == epochs * niter_per_ep
     return schedule
+
 
 def dino_collate_fn(batch):
     output = {'global_crops': [], 'local_crops': []}
@@ -44,11 +46,12 @@ def dino_collate_fn(batch):
 
     return output
 
+
 class Trainer:
     def __init__(self):
         # --- 1. Distributed Init ---
         self.is_distributed = int(os.environ.get("WORLD_SIZE", 1)) > 1
-        
+
         if self.is_distributed:
             dist.init_process_group("nccl")
             self.rank = int(os.environ["RANK"])
@@ -65,7 +68,7 @@ class Trainer:
         # Only log on master process
         if self.rank == 0:
             logger.info(f"Training on {self.device} (World Size: {self.world_size})")
-        
+
         # --- Hyperparameters ---
         self.output_dim = 1024  # Original 65536 vector is too large for our batch size
         self.batch_size = 64 # Per GPU
@@ -77,19 +80,16 @@ class Trainer:
 
         self.teacher_temp_start = 0.04
         self.teacher_temp_end = 0.07
-        self.teacher_temp_warmup_epochs = 30
-        self.teacher_momentum = 0.996
-
         self.momentum_teacher_start = 0.996
         self.momentum_teacher_end = 1.0
         self.weight_decay_start = 0.04
         self.weight_decay_end = 0.4
-        
+
         self.w_dino = 1.0
         self.w_ibot = 1.0
         self.w_gram = 1.0
         self.w_koleo = 0.1
-        
+
         # --- Masking, Data & Sampler ---
         self.mask_generator = MaskingGenerator(input_size=(224, 224), patch_size=32, mask_ratio=0.5)
         dataset = SonarDataset(data_dir="./dataset", ext="*.npy")
@@ -100,7 +100,7 @@ class Trainer:
             def __init__(self, ds, tf): self.ds = ds; self.tf = tf
             def __len__(self): return len(self.ds)
             def __getitem__(self, idx): return self.tf(self.ds[idx])
-            
+
         self.dataset = TransformedDataset(dataset, transform)
 
         # DISTRIBUTED SAMPLER
@@ -126,7 +126,7 @@ class Trainer:
             final_value=self.teacher_temp_end,
             epochs=self.epochs,
             niter_per_ep=len(self.loader),
-            warmup_epochs=self.teacher_temp_warmup_epochs,
+            warmup_epochs=self.warmup_epochs,
             start_warmup_value=self.teacher_temp_start,
         )
 
@@ -159,18 +159,18 @@ class Trainer:
         student_backbone = ConvNeXtTiny(in_chans=1)
         teacher_backbone = ConvNeXtTiny(in_chans=1)
         embed_dim = student_backbone.embed_dim
-        
+
         student_head = DINOHead(embed_dim, out_dim=self.output_dim)
         teacher_head = DINOHead(embed_dim, out_dim=self.output_dim)
-        
+
         self.student = MultiCropWrapper(student_backbone, student_head).to(self.device)
         self.teacher = MultiCropWrapper(teacher_backbone, teacher_head).to(self.device)
-        
+
         for p in self.teacher.parameters():
             p.requires_grad = False
         self.teacher.load_state_dict(self.student.state_dict())
 
-        # 2. Add iBOT Heads (Separate from DINO Head)
+        # Add iBOT Heads (Separate from DINO Head)
         # They project patch tokens (embed_dim) -> prototypes (output_dim)
         student_ibot_head = DINOHead(embed_dim, out_dim=self.output_dim)
         teacher_ibot_head = DINOHead(embed_dim, out_dim=self.output_dim)
@@ -242,7 +242,7 @@ class Trainer:
                 masks_list.append(torch.from_numpy(m).bool())
             masks = torch.stack(masks_list).to(self.device) # (2*B, N_patches)
 
-            # --- 2. APPLY MASKS TO STUDENT IMAGES ---
+            # --- APPLY MASKS TO STUDENT IMAGES ---
             # We need to upsample the mask from (7x7) to (224x224) to zero out pixels
             # ConvNeXt stride is 32.
             mask_grid_h = 224 // 32 
