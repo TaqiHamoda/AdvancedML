@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 class DINOLoss(nn.Module):
-    def __init__(self, out_dim, student_temp=0.1, n_iterations=3, center_momentum=0.9):
+    def __init__(self, out_dim, student_temp=0.1, n_iterations=3, center_momentum=0.99):
         super().__init__()
         self.student_temp = student_temp
         self.n_iterations = n_iterations

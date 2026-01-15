@@ -66,8 +66,7 @@ class Trainer:
         
         # --- Hyperparameters ---
         self.batch_size = 64 # Per GPU
-        # LINEAR SCALING RULE: Scale LR by world size
-        self.base_lr = 0.0005 * self.world_size 
+        self.base_lr = 0.0005 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
         self.min_lr = 1e-6
         self.weight_decay = 0.04
         self.epochs = 100
