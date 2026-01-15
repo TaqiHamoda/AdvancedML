@@ -49,7 +49,6 @@ def dino_collate_fn(batch):
 
 class Trainer:
     def __init__(self):
-        # --- 1. Distributed Init ---
         self.is_distributed = int(os.environ.get("WORLD_SIZE", 1)) > 1
 
         if self.is_distributed:
@@ -71,7 +70,7 @@ class Trainer:
 
         # --- Hyperparameters ---
         self.output_dim = 1024  # Original 65536 vector is too large for our batch size
-        self.batch_size = 64 # Per GPU
+        self.batch_size = 64  # Per GPU
         self.base_lr = 0.0005 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
         self.min_lr = 1e-6
         self.weight_decay = 0.04
@@ -82,7 +81,7 @@ class Trainer:
         self.teacher_temp_end = 0.07
         self.momentum_teacher_start = 0.996
         self.momentum_teacher_end = 1.0
-        self.weight_decay_start = 0.04
+        self.weight_decay_start = self.weight_decay
         self.weight_decay_end = 0.4
 
         self.w_dino = 1.0
@@ -110,9 +109,9 @@ class Trainer:
             self.sampler = None
 
         self.loader = DataLoader(
-            self.dataset, 
-            batch_size=self.batch_size, 
-            shuffle=(self.sampler is None), # Shuffle handled by sampler if DDP
+            self.dataset,
+            batch_size=self.batch_size,
+            shuffle=(self.sampler is None),  # Shuffle handled by sampler if DDP
             sampler=self.sampler,
             num_workers=16,
             pin_memory=True,
@@ -219,7 +218,7 @@ class Trainer:
 
         for i, batch_imgs in enumerate(self.loader):
             it = len(self.loader) * epoch_index + i
-            
+
             # LR Update
             current_lr = self.lr_schedule[it]
             current_wd = self.wd_schedule[it]
@@ -232,38 +231,36 @@ class Trainer:
             global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['global_crops']]
             local_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['local_crops']]
 
-            # --- 1. GENERATE MASKS (On CPU or GPU) ---
             # We only mask global crops for iBOT.
             # Mask shape: (B, N_patches)
             B = global_crops[0].shape[0]
             masks_list = []
-            for _ in range(B * 2): # 2 global crops per image
+            for _ in range(B * 2):  # 2 global crops per image
                 m = self.mask_generator()
                 masks_list.append(torch.from_numpy(m).bool())
-            masks = torch.stack(masks_list).to(self.device) # (2*B, N_patches)
+            masks = torch.stack(masks_list).to(self.device)  # (2*B, N_patches)
 
-            # --- APPLY MASKS TO STUDENT IMAGES ---
             # We need to upsample the mask from (7x7) to (224x224) to zero out pixels
             # ConvNeXt stride is 32.
             mask_grid_h = 224 // 32 
             mask_grid_w = 224 // 32
-            
+
             # Reshape to (2*B, 1, 7, 7)
             masks_spatial = masks.view(-1, 1, mask_grid_h, mask_grid_w)
             # Upsample nearest neighbor to (2*B, 1, 224, 224)
             masks_upsampled = F.interpolate(masks_spatial.float(), size=(224, 224), mode='nearest')
-            
+
             # Create masked input for student
             # We concatenate the two global lists to batch process
-            global_concat = torch.cat(global_crops, dim=0) # (2*B, 1, 224, 224)
-            masked_global_inputs = global_concat * (1 - masks_upsampled) # Zero out masked areas
+            global_concat = torch.cat(global_crops, dim=0)  # (2*B, 1, 224, 224)
+            masked_global_inputs = global_concat * (1 - masks_upsampled)  # Zero out masked areas
 
             with torch.amp.autocast('cuda'):
                 with torch.no_grad():
                     teacher_output, teacher_patches_list, _ = self.teacher(global_crops)
-                    t_patches = torch.cat(teacher_patches_list, dim=0) # (2*B, N, D)
-                    t_patches_masked = t_patches[masks.bool()] # (Total_Masked_Tokens, D)
-                    t_ibot_out = self.teacher_ibot_head(t_patches_masked) # (Total_Masked_Tokens, K)
+                    t_patches = torch.cat(teacher_patches_list, dim=0)  # (2*B, N, D)
+                    t_patches_masked = t_patches[masks.bool()]  # (Total_Masked_Tokens, D)
+                    t_ibot_out = self.teacher_ibot_head(t_patches_masked)  # (Total_Masked_Tokens, K)
 
                 # STUDENT: Sees MASKED Global + FULL Local
                 # We need to reconstruct the list for MultiCropWrapper
@@ -277,9 +274,9 @@ class Trainer:
 
                 # iBOT Loss (Patch tokens)
                 # Select only the global crop patches from student output (first 2 items)
-                s_global_patches = student_patches_list[0] # (2*B, N, D)
-                s_patches_masked = s_global_patches[masks.bool()] # (Total_Masked_Tokens, D)
-                s_ibot_out = self.student_ibot_head(s_patches_masked) # (Total_Masked_Tokens, K)
+                s_global_patches = student_patches_list[0]  # (2*B, N, D)
+                s_patches_masked = s_global_patches[masks.bool()]  # (Total_Masked_Tokens, D)
+                s_ibot_out = self.student_ibot_head(s_patches_masked)  # (Total_Masked_Tokens, K)
                 loss_ibot = self.ibot_loss_fn(
                     s_ibot_out,
                     t_ibot_out,
@@ -336,7 +333,7 @@ class Trainer:
         if self.rank == 0:
             logger.info(f"Model collapse happens at DINO loss value: ln({self.output_dim}) ~ {np.log(self.output_dim):.2f}")
             logger.info("Starting training...")
-        
+
         # Use simple range, tqdm only on master to avoid messed up bars
         iterator = range(self.epochs)
         if self.rank == 0:
@@ -344,8 +341,6 @@ class Trainer:
 
         for epoch in iterator:
             self.train_one_epoch(epoch)
-            
-            # Save only on Master
             if self.rank == 0:
                 save_dict = {
                     'epoch': epoch,
@@ -354,15 +349,12 @@ class Trainer:
                     'optimizer': self.optimizer.state_dict(),
                 }
                 torch.save(save_dict, f"weights/checkpoint_{epoch}.pth")
-        
+
         if self.is_distributed:
             dist.destroy_process_group()
 
 if __name__ == "__main__":
-    # Setup logging only on Rank 0 usually, but here we just use basic config
-    # A cleaner way is to check env vars before config
     rank = int(os.environ.get("RANK", 0))
-    
     if rank == 0:
         os.makedirs("logs", exist_ok=True)
         os.makedirs("weights", exist_ok=True)
@@ -373,7 +365,7 @@ if __name__ == "__main__":
             level=logging.INFO
         )
     else:
-        logging.basicConfig(level=logging.ERROR) # Silence other processes
+        logging.basicConfig(level=logging.ERROR)  # Silence other processes
 
     trainer = Trainer()
     trainer.run()

@@ -10,7 +10,6 @@ class SinkhornKnopp(nn.Module):
         self.student_temp = student_temp
         self.n_iterations = n_iterations
 
-    # Reuse the same Sinkhorn logic (or inherit from a shared base class)
     @torch.no_grad()
     def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp):
         teacher_output = teacher_output.float()

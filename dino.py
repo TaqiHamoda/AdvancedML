@@ -123,12 +123,12 @@ class ConvNeXtTiny(nn.Module):
         for i in range(4):
             x = self.downsample_layers[i](x)
             x = self.stages[i](x)
-        
+
         # x is now (N, 768, H/32, W/32)
         # Global Pooling for [CLS] token analog
         x_cls = x.mean([-2, -1]) # (N, 768)
         x_cls = self.norm(x_cls)
-        
+
         # Flatten spatial dims for Patch tokens (for Gram loss / RANSAC)
         # (N, C, H', W') -> (N, H'*W', C)
         x_patch = x.flatten(2).transpose(1, 2)
@@ -206,7 +206,6 @@ class MultiCropWrapper(nn.Module):
         current_res = x[0].shape[-1]
 
         # Iterate to find boundaries where resolution changes
-        # We start from 1 to check transition from i-1 to i
         for i in range(1, n_crops + 1):
             # If we reached the end or the resolution changed
             if i == n_crops or x[i].shape[-1] != current_res:
@@ -218,7 +217,6 @@ class MultiCropWrapper(nn.Module):
 
                 # Forward pass
                 _out_cls, _out_patch = self.backbone(block_input)
-
                 output_cls_tokens.append(_out_cls)
                 output_patch_tokens_list.append(_out_patch)
 
