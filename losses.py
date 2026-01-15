@@ -4,11 +4,22 @@ import torch.nn.functional as F
 
 
 class DINOLoss(nn.Module):
-    def __init__(self, student_temp=0.1, n_iterations=3):
+    def __init__(self, out_dim, student_temp=0.1, n_iterations=3, center_momentum=0.9):
         super().__init__()
         self.student_temp = student_temp
         self.n_iterations = n_iterations
+        self.center_momentum = center_momentum
+        self.register_buffer("center", torch.zeros(1, out_dim))
 
+    @torch.no_grad()
+    def update_center(self, teacher_output):
+        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
+        # If distributed, dist.all_reduce(batch_center)
+        batch_center = batch_center / len(teacher_output)
+        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
+
+    # Sinkhorn not used since batch size is too small for the unifrom distribution
+    # This results in model collapse quickly
     @torch.no_grad()
     def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp):
         """
@@ -34,39 +45,77 @@ class DINOLoss(nn.Module):
         Q *= B # The columns must sum to 1 so that Q is an assignment probability
         return Q.t() # Return to (Batch, out_dim)
 
+    # def forward(self, student_output, teacher_output, teacher_temp):
+    #     """
+    #     Cross-entropy between softmax outputs of the teacher and student.
+    #     """
+    #     # Teacher output is always from the 2 global crops, so Total = 2 * B
+    #     n_teacher_crops = 2
+        
+    #     # Split teacher outputs back into per-crop views for the loop
+    #     teacher_out = self.sinkhorn_knopp_teacher(teacher_output, teacher_temp)
+    #     teacher_out = teacher_out.detach().chunk(n_teacher_crops)
+
+    #     # Student_output contains Global + Local crops
+    #     # Split into list of tensors, where each tensor is (B, Dim)
+    #     batch_size = teacher_output.shape[0] // n_teacher_crops
+    #     student_out = student_output / self.student_temp
+    #     n_student_crops = student_out.shape[0] // batch_size
+    #     student_out = student_out.chunk(n_student_crops)
+
+    #     # Compute cross-entropy loss between teacher and student
+    #     total_loss, n_loss_terms = 0, 0
+    #     for iq, q in enumerate(teacher_out):
+    #         for v in range(len(student_out)):
+    #             # Skip the case where student and teacher view the exact same image
+    #             if v == iq: 
+    #                 continue
+
+    #             # q is the target probability from teacher (after Sinkhorn)
+    #             # student_out[v] are the raw logits from student
+    #             loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
+    #             total_loss += loss.mean()
+
+    #             n_loss_terms += 1
+
+    #     return total_loss / n_loss_terms
+
     def forward(self, student_output, teacher_output, teacher_temp):
         """
         Cross-entropy between softmax outputs of the teacher and student.
         """
+        # 1. Solve for Batch Size (B)
         # Teacher output is always from the 2 global crops, so Total = 2 * B
         n_teacher_crops = 2
-        
-        # Split teacher outputs back into per-crop views for the loop
-        teacher_out = self.sinkhorn_knopp_teacher(teacher_output, teacher_temp)
-        teacher_out = teacher_out.detach().chunk(n_teacher_crops)
-
-        # Student_output contains Global + Local crops
-        # Split into list of tensors, where each tensor is (B, Dim)
         batch_size = teacher_output.shape[0] // n_teacher_crops
+        
+        # 2. Prepare Student Logits
+        # Split into list of tensors, where each tensor is (B, Dim)
         student_out = student_output / self.student_temp
         n_student_crops = student_out.shape[0] // batch_size
         student_out = student_out.chunk(n_student_crops)
 
-        # Compute cross-entropy loss between teacher and student
-        total_loss, n_loss_terms = 0, 0
+        # 3. Prepare Teacher Probabilities
+        # Split into list of tensors, where each tensor is (B, Dim)
+        teacher_out = F.softmax((teacher_output - self.center) / teacher_temp, dim=-1)
+        teacher_out = teacher_out.detach().chunk(n_teacher_crops)
+
+        total_loss = 0
+        n_loss_terms = 0
+        
+        # 4. Compute Cross-Entropy Loop
         for iq, q in enumerate(teacher_out):
             for v in range(len(student_out)):
                 # Skip the case where student and teacher view the exact same image
                 if v == iq: 
                     continue
-
-                # q is the target probability from teacher (after Sinkhorn)
-                # student_out[v] are the raw logits from student
+                
+                # q: (B, Dim), student_out[v]: (B, Dim) -> Loss is valid
                 loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
                 total_loss += loss.mean()
-
                 n_loss_terms += 1
-
+                
+        self.update_center(teacher_output)
         return total_loss / n_loss_terms
 
 

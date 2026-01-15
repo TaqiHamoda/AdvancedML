@@ -19,6 +19,7 @@ class DropPath(nn.Module):
         random_tensor.floor_()
         return x.div(keep_prob) * random_tensor
 
+
 class LayerNorm(nn.Module):
     """LayerNorm that supports channels_last (default) or channels_first."""
     def __init__(self, normalized_shape, eps=1e-6, data_format="channels_last"):
@@ -157,10 +158,11 @@ class DINOHead(nn.Module):
         self.apply(self._init_weights)
         
         # The last layer (prototypes) requires Weight Normalization in DINO
-        self.last_layer = nn.utils.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
-        self.last_layer.weight_g.data.fill_(1)
-        if norm_last_layer:
-            self.last_layer.weight_g.requires_grad = False
+        self.last_layer = nn.utils.parametrizations.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
+        with torch.no_grad():
+            self.last_layer.parametrizations.weight.original0.fill_(1)
+            if norm_last_layer:
+                self.last_layer.parametrizations.weight.original0.requires_grad = False
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):

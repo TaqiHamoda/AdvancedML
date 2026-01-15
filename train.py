@@ -48,7 +48,7 @@ class Trainer:
         
         # Loss Weights
         self.w_dino = 1.0
-        self.w_gram = 0.5  # High weight for texture matching
+        self.w_gram = 1.0
         self.w_koleo = 0.1
         
         # --- Data ---
@@ -103,7 +103,7 @@ class Trainer:
         self.teacher.load_state_dict(self.student.state_dict())
 
         # --- Losses ---
-        self.dino_loss_fn = DINOLoss().to(self.device)
+        self.dino_loss_fn = DINOLoss(out_dim=65536).to(self.device)
         self.gram_loss_fn = GramLoss().to(self.device)
         self.koleo_loss_fn = KoLeoLoss().to(self.device)
 
@@ -147,8 +147,6 @@ class Trainer:
                 param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
 
     def train_one_epoch(self, epoch_index):
-        total_loss = 0
-        
         for i, batch_imgs in enumerate(self.loader):
             it = len(self.loader) * epoch_index + i
             
@@ -201,9 +199,7 @@ class Trainer:
             
             # 6. Update Teacher
             self.update_teacher_ema()
-            
-            total_loss += loss.item()
-            
+
             if i % 10 == 0:
                 logger.info(f"Epoch {epoch_index} [{i}/{len(self.loader)}] "
                       f"lr: {current_lr:.6f}, Loss: {loss.item():.4f} (D:{loss_dino:.3f} G:{loss_gram:.3f} K:{loss_koleo:.3f})")
