@@ -65,17 +65,18 @@ class Trainer:
             logger.info(f"Training on {self.device} (World Size: {self.world_size})")
         
         # --- Hyperparameters ---
+        self.output_dim = 65536
         self.batch_size = 64 # Per GPU
         self.base_lr = 0.0005 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
         self.min_lr = 1e-6
         self.weight_decay = 0.04
         self.epochs = 100
-        self.warmup_epochs = 10
+        self.warmup_epochs = self.epochs // 2
 
         self.teacher_temp_start = 0.04
         self.teacher_temp_end = 0.07
         self.teacher_temp_warmup_epochs = 30
-        self.momentum_teacher = 0.996
+        self.teacher_momentum = 0.996
         
         self.w_dino = 1.0
         self.w_gram = 1.0
@@ -136,8 +137,8 @@ class Trainer:
         teacher_backbone = ConvNeXtTiny(in_chans=1)
         embed_dim = student_backbone.embed_dim
         
-        student_head = DINOHead(embed_dim, out_dim=65536)
-        teacher_head = DINOHead(embed_dim, out_dim=65536)
+        student_head = DINOHead(embed_dim, out_dim=self.output_dim)
+        teacher_head = DINOHead(embed_dim, out_dim=self.output_dim)
         
         self.student = MultiCropWrapper(student_backbone, student_head).to(self.device)
         self.teacher = MultiCropWrapper(teacher_backbone, teacher_head).to(self.device)
@@ -152,7 +153,7 @@ class Trainer:
             self.student = DDP(self.student, device_ids=[self.local_rank])
 
         # --- Losses ---
-        self.dino_loss_fn = DINOLoss(out_dim=65536).to(self.device)
+        self.dino_loss_fn = DINOLoss(out_dim=self.output_dim).to(self.device)
         self.gram_loss_fn = GramLoss().to(self.device)
         self.koleo_loss_fn = KoLeoLoss().to(self.device)
 
@@ -177,7 +178,7 @@ class Trainer:
 
     def update_teacher_ema(self):
         with torch.no_grad():
-            m = self.momentum_teacher
+            m = self.teacher_momentum
             # Unwrap DDP student for EMA update to avoid name mismatch
             student_model = self.student.module if self.is_distributed else self.student
             
@@ -235,6 +236,7 @@ class Trainer:
 
     def run(self):
         if self.rank == 0:
+            logger.info(f"Model collapse loss value: ln({self.output_dim}) = {np.log(self.output_dim):.2f}")
             logger.info("Starting training...")
         
         # Use simple range, tqdm only on master to avoid messed up bars
