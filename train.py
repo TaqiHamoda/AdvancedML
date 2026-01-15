@@ -194,12 +194,6 @@ class Trainer:
         return [{'params': regularized, 'weight_decay': self.weight_decay},
                 {'params': not_regularized, 'weight_decay': 0.0}]
 
-    def update_teacher_ema(self):
-        with torch.no_grad():
-            m = self.teacher_momentum
-            # Unwrap DDP student for EMA update to avoid name mismatch
-            
-
     def train_one_epoch(self, epoch_index):
         # CRITICAL: Set epoch for sampler shuffling
         if self.sampler is not None:
@@ -284,8 +278,6 @@ class Trainer:
             torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=3.0)
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            
-            self.update_teacher_ema()
 
             with torch.no_grad():
                 m = self.teacher_momentum
