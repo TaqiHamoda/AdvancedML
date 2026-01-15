@@ -324,6 +324,10 @@ class Trainer:
             del student_output, teacher_output
             del s_ibot_out, t_ibot_out
             del global_crops, local_crops, masks
+            del student_patches_list, teacher_patches_list
+            del student_cls
+            del masked_global_inputs, masks_upsampled
+            del all_student_crops
 
             torch.cuda.empty_cache()
 
