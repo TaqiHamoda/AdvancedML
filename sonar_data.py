@@ -1,5 +1,5 @@
 import numpy as np
-import os, glob, logging
+import os, glob, logging, random, math
 
 import torch
 from torch.utils.data import Dataset
@@ -32,24 +32,77 @@ class GaussianNoise(torch.nn.Module):
 class MaskingGenerator:
     def __init__(
         self,
-        input_size=(224, 224), # Global crop size
-        patch_size=32,         # ConvNeXt Tiny stride (final feature map resolution)
-        mask_ratio=0.5,        # 50% masking is standard for iBOT
+        input_size=(224, 224),
+        patch_size=32,
+        mask_ratio=0.5,
+        min_num_patches=4,     # Minimum size of a single block
+        max_num_patches=None,  # Max size of a single block (defaults to varying)
+        min_aspect=0.3,        # Min aspect ratio of block
+        max_aspect=None,       # Max aspect ratio of block
     ):
-        self.height, self.width = input_size
-        self.patch_size = patch_size
-        self.num_patches_h = self.height // patch_size
-        self.num_patches_w = self.width // patch_size
-        self.num_patches = self.num_patches_h * self.num_patches_w
-        self.num_mask = int(mask_ratio * self.num_patches)
+        self.height, self.width = input_size[0] // patch_size, input_size[1] // patch_size
+        self.num_patches = self.height * self.width
+        self.num_masking_patches = int(mask_ratio * self.num_patches)
+
+        self.min_num_patches = min_num_patches
+        self.max_num_patches = max_num_patches if max_num_patches else self.num_masking_patches
+        
+        max_aspect = max_aspect or 1 / min_aspect
+        self.log_aspect_ratio = (math.log(min_aspect), math.log(max_aspect))
+
+    def _mask(self, mask, max_mask_patches):
+        """
+        Tries to mask a random block with random aspect ratio.
+        """
+        delta = 0
+        for _ in range(10): # Try 10 times to find a valid block
+            target_area = random.uniform(self.min_num_patches, max_mask_patches)
+            aspect_ratio = math.exp(random.uniform(*self.log_aspect_ratio))
+            h = int(round(math.sqrt(target_area * aspect_ratio)))
+            w = int(round(math.sqrt(target_area / aspect_ratio)))
+            
+            if w < self.width and h < self.height:
+                top = random.randint(0, self.height - h)
+                left = random.randint(0, self.width - w)
+
+                num_masked = mask[top : top + h, left : left + w].sum()
+                
+                # Check if we are overlapping too much or adding too many patches
+                if 0 < h * w - num_masked <= max_mask_patches:
+                    for i in range(top, top + h):
+                        for j in range(left, left + w):
+                            if mask[i, j] == 0:
+                                mask[i, j] = 1
+                                delta += 1
+                if delta > 0:
+                    break
+        return delta
 
     def __call__(self):
-        mask = np.hstack([
-            np.zeros(self.num_patches - self.num_mask),
-            np.ones(self.num_mask),
-        ])
-        np.random.shuffle(mask)
-        return mask # (N_patches, ) 0=Keep, 1=Mask
+        mask = np.zeros(shape=(self.height, self.width), dtype=int)
+        mask_count = 0
+        
+        # Repeatedly add blocks until we reach the target mask ratio
+        while mask_count < self.num_masking_patches:
+            max_mask_patches = self.num_masking_patches - mask_count
+            max_mask_patches = min(max_mask_patches, self.max_num_patches)
+
+            delta = self._mask(mask, max_mask_patches)
+            if delta == 0:
+                break
+            else:
+                mask_count += delta
+
+        # If we didn't reach the exact count (rare), fill the rest randomly
+        if mask_count < self.num_masking_patches:
+             mask_flat = mask.flatten()
+             to_add = np.random.choice(np.where(mask_flat == 0)[0], 
+                                       size=self.num_masking_patches - mask_count, 
+                                       replace=False)
+             mask_flat[to_add] = 1
+             mask = mask_flat.reshape((self.height, self.width))
+            
+        return mask.flatten() # Returns (N_patches,) for compatibility with your training loop
 
 
 class SonarDataset(Dataset):

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 class DINOLoss(nn.Module):
-    def __init__(self, out_dim, student_temp=0.1, n_iterations=3, center_momentum=0.9):
+    def __init__(self, out_dim, student_temp=0.1, n_iterations=3, center_momentum=0.99):
         super().__init__()
         self.student_temp = student_temp
         self.n_iterations = n_iterations
@@ -50,42 +50,45 @@ class DINOLoss(nn.Module):
 
     def forward(self, student_output, teacher_output, teacher_temp):
         """
-        Cross-entropy between softmax outputs of the teacher and student.
+        Efficient Cross-entropy between teacher and student using torch.einsum.
         """
-        # 1. Solve for Batch Size (B)
         n_teacher_crops = 2
-        batch_size = teacher_output.shape[0] // n_teacher_crops
+        B = teacher_output.shape[0] // n_teacher_crops
+        n_student_crops = student_output.shape[0] // B
 
-        # 2. Prepare Student Logits
-        # Cast to float() for AMP stability (Good job including this!)
-        student_out = (student_output / self.student_temp).float()
-        n_student_crops = student_out.shape[0] // batch_size
-        student_out = student_out.chunk(n_student_crops)
+        # Reshape and cast (float for stability)
+        # Shape: (S, B, D)
+        s_out = (student_output / self.student_temp).float()
+        s_out = s_out.view(n_student_crops, B, -1)
+        
+        # Shape: (T, B, D)
+        t_out = (teacher_output - self.center).float()
+        t_out = t_out.view(n_teacher_crops, B, -1)
 
-        # 3. Prepare Teacher Probabilities
-        # Using Softmax centering instead of Sinkhorn (Stable for smaller batches)
-        teacher_out = F.softmax((teacher_output - self.center) / teacher_temp, dim=-1)
-        teacher_out = teacher_out.detach().chunk(n_teacher_crops)
+        # Log-Softmax for Student, Softmax for Teacher
+        s_log_probs = F.log_softmax(s_out, dim=-1) 
+        t_probs = F.softmax(t_out / teacher_temp, dim=-1)
 
-        total_loss = 0
-        n_loss_terms = 0
+        # "s b k, t b k -> s t"
+        # s: student crops, t: teacher crops, b: batch size, k: embedding dim
+        # We sum over batch (b) and embedding (k) to get a (S, T) matrix of total losses
+        loss_matrix = -torch.einsum("sbk,tbk->st", s_log_probs, t_probs)
 
-        # 4. Compute Cross-Entropy Loop
-        for iq, q in enumerate(teacher_out):
-            for v in range(len(student_out)):
-                if v == iq: 
-                    continue
+        # We ignore cases where student_crop_idx == teacher_crop_idx (e.g., global1 vs global1)
+        # This zeroes out the diagonal elements (0,0), (1,1) etc.
+        min_crops = min(n_student_crops, n_teacher_crops)
+        loss_matrix = torch.diagonal_scatter(loss_matrix, torch.zeros(min_crops, device=loss_matrix.device))
 
-                loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
-                total_loss += loss.mean()
-                n_loss_terms += 1
+        # Divide by total number of valid samples (Total pairs * Batch - Diagonal * Batch)
+        total_loss = loss_matrix.sum()
+        normalization = B * (n_student_crops * n_teacher_crops - min_crops)
 
         self.update_center(teacher_output)
-        return total_loss / n_loss_terms
+        return total_loss / normalization
 
 
 class iBOTPatchLoss(nn.Module):
-    def __init__(self, out_dim, student_temp=0.1, center_momentum=0.9):
+    def __init__(self, out_dim, student_temp=0.1, center_momentum=0.99):
         super().__init__()
         self.student_temp = student_temp
         self.center_momentum = center_momentum

@@ -79,6 +79,11 @@ class Trainer:
         self.teacher_temp_end = 0.07
         self.teacher_temp_warmup_epochs = 30
         self.teacher_momentum = 0.996
+
+        self.momentum_teacher_start = 0.996
+        self.momentum_teacher_end = 1.0
+        self.weight_decay_start = 0.04
+        self.weight_decay_end = 0.4
         
         self.w_dino = 1.0
         self.w_ibot = 1.0
@@ -132,6 +137,20 @@ class Trainer:
             niter_per_ep=len(self.loader),
             warmup_epochs=self.warmup_epochs,
             start_warmup_value=0,
+        )
+
+        self.wd_schedule = cosine_scheduler(
+            base_value=self.weight_decay_start,
+            final_value=self.weight_decay_end,
+            epochs=self.epochs,
+            niter_per_ep=len(self.loader),
+        )
+
+        self.momentum_schedule = cosine_scheduler(
+            base_value=self.momentum_teacher_start,
+            final_value=self.momentum_teacher_end,
+            epochs=self.epochs,
+            niter_per_ep=len(self.loader),
         )
 
         self.scaler = torch.amp.GradScaler('cuda')
@@ -204,8 +223,12 @@ class Trainer:
             
             # LR Update
             current_lr = self.lr_schedule[it]
+            current_wd = self.wd_schedule[it]
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = current_lr
+                # Only apply weight decay to the regularized group (index 0)
+                if param_group['weight_decay'] > 0:
+                    param_group['weight_decay'] = current_wd
             
             global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['global_crops']]
             local_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['local_crops']]
@@ -280,7 +303,7 @@ class Trainer:
             self.scaler.update()
 
             with torch.no_grad():
-                m = self.teacher_momentum
+                m = self.momentum_schedule[it]
 
                 student_model = self.student.module if self.is_distributed else self.student
                 for param_q, param_k in zip(student_model.parameters(), self.teacher.parameters()):
