@@ -67,7 +67,7 @@ class Trainer:
             logger.info(f"Training on {self.device} (World Size: {self.world_size})")
         
         # --- Hyperparameters ---
-        self.output_dim = 65536
+        self.output_dim = 1024  # Original 65536 vector is too large for our batch size
         self.batch_size = 64 # Per GPU
         self.base_lr = 0.0005 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
         self.min_lr = 1e-6
@@ -187,8 +187,8 @@ class Trainer:
             self.student_ibot_head = DDP(self.student_ibot_head, device_ids=[self.local_rank])
 
         # --- Losses ---
-        self.dino_loss_fn = DINOLoss(out_dim=self.output_dim).to(self.device)
-        self.ibot_loss_fn = iBOTPatchLoss(out_dim=self.output_dim).to(self.device)
+        self.dino_loss_fn = DINOLoss().to(self.device)
+        self.ibot_loss_fn = iBOTPatchLoss().to(self.device)
         self.gram_loss_fn = GramLoss().to(self.device)
         self.koleo_loss_fn = KoLeoLoss().to(self.device)
 

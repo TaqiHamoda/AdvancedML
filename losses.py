@@ -3,137 +3,95 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
-class DINOLoss(nn.Module):
-    def __init__(self, out_dim, student_temp=0.1, n_iterations=3, center_momentum=0.995):
+
+class SinkhornKnopp(nn.Module):
+    def __init__(self, student_temp=0.1, n_iterations=3):
         super().__init__()
         self.student_temp = student_temp
         self.n_iterations = n_iterations
-        self.center_momentum = center_momentum
-        self.register_buffer("center", torch.zeros(1, out_dim))
 
-    @torch.no_grad()
-    def update_center(self, teacher_output):
-        """
-        Update center used for teacher output centering.
-        """
-        # Sum the output within the local batch
-        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
-        
-        # If DDP is enabled, sum across all GPUs
-        if dist.is_initialized():
-            dist.all_reduce(batch_center)
-            # Normalize by total batch size across all GPUs
-            batch_center = batch_center / (len(teacher_output) * dist.get_world_size())
-        else:
-            # Single GPU normalization
-            batch_center = batch_center / len(teacher_output)
-
-        # EMA update
-        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
-
-    # Sinkhorn not used since batch size is too small for the unifrom distribution
-    # This results in model collapse quickly
+    # Reuse the same Sinkhorn logic (or inherit from a shared base class)
     @torch.no_grad()
     def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp):
+        teacher_output = teacher_output.float()
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+
         Q = torch.exp(teacher_output / teacher_temp).t() 
-        K, B = Q.shape[0], Q.shape[1] 
-        Q /= torch.sum(Q)
+        B = Q.shape[1] * world_size 
+        K = Q.shape[0] 
+
+        sum_Q = torch.sum(Q)
+        if dist.is_initialized():
+            dist.all_reduce(sum_Q)
+        Q /= sum_Q
 
         for _ in range(self.n_iterations):
-            Q /= torch.sum(Q, dim=1, keepdim=True)
+            sum_of_rows = torch.sum(Q, dim=1, keepdim=True)
+            if dist.is_initialized():
+                dist.all_reduce(sum_of_rows)
+            Q /= sum_of_rows
             Q /= K
             Q /= torch.sum(Q, dim=0, keepdim=True)
             Q /= B
 
         Q *= B 
-        return Q.t() 
+        return Q.t()
 
+
+class DINOLoss(SinkhornKnopp):
     def forward(self, student_output, teacher_output, teacher_temp):
         """
-        Efficient Cross-entropy between teacher and student using torch.einsum.
+        Args:
+            student_output: (S * B, D) student logits
+            teacher_output: (T * B, D) teacher logits
+            teacher_temp: scalar temperature
         """
         n_teacher_crops = 2
         B = teacher_output.shape[0] // n_teacher_crops
         n_student_crops = student_output.shape[0] // B
 
-        # Reshape and cast (float for stability)
-        # Shape: (S, B, D)
+        # Student: Log-Softmax with temperature
         s_out = (student_output / self.student_temp).float()
         s_out = s_out.view(n_student_crops, B, -1)
-        
-        # Shape: (T, B, D)
-        t_out = (teacher_output - self.center).float()
-        t_out = t_out.view(n_teacher_crops, B, -1)
-
-        # Log-Softmax for Student, Softmax for Teacher
         s_log_probs = F.log_softmax(s_out, dim=-1) 
-        t_probs = F.softmax(t_out / teacher_temp, dim=-1)
 
-        # "s b k, t b k -> s t"
-        # s: student crops, t: teacher crops, b: batch size, k: embedding dim
-        # We sum over batch (b) and embedding (k) to get a (S, T) matrix of total losses
+        # Teacher: Sinkhorn-Knopp centering + sharpening
+        t_probs = self.sinkhorn_knopp_teacher(teacher_output, teacher_temp)
+        t_probs = t_probs.view(n_teacher_crops, B, -1).detach()
+
+        # Cross-Entropy Loss
+        # "s b k, t b k -> s t" sum over batch and embedding dim
         loss_matrix = -torch.einsum("sbk,tbk->st", s_log_probs, t_probs)
 
-        # We ignore cases where student_crop_idx == teacher_crop_idx (e.g., global1 vs global1)
-        # This zeroes out the diagonal elements (0,0), (1,1) etc.
+        # Remove diagonal (same crop comparison)
         min_crops = min(n_student_crops, n_teacher_crops)
         loss_matrix = torch.diagonal_scatter(loss_matrix, torch.zeros(min_crops, device=loss_matrix.device))
 
-        # Divide by total number of valid samples (Total pairs * Batch - Diagonal * Batch)
         total_loss = loss_matrix.sum()
         normalization = B * (n_student_crops * n_teacher_crops - min_crops)
 
-        self.update_center(teacher_output)
         return total_loss / normalization
 
 
-class iBOTPatchLoss(nn.Module):
-    def __init__(self, out_dim, student_temp=0.1, center_momentum=0.995):
-        super().__init__()
-        self.student_temp = student_temp
-        self.center_momentum = center_momentum
-        self.register_buffer("center", torch.zeros(1, out_dim))
-
-    @torch.no_grad()
-    def update_center(self, teacher_output):
-        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
-        if dist.is_initialized():
-            dist.all_reduce(batch_center)
-            batch_center = batch_center / (len(teacher_output) * dist.get_world_size())
-        else:
-            batch_center = batch_center / len(teacher_output)
-        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
-
+class iBOTPatchLoss(SinkhornKnopp):
     def forward(self, student_patches, teacher_patches, masks, teacher_temp):
-        """
-        Efficient implementation that expects flattened, MASKED-ONLY tokens.
-        
-        Args:
-            student_patches: (Total_Masked_Tokens, K) - Output of student head
-            teacher_patches: (Total_Masked_Tokens, K) - Output of teacher head
-            masks: (B, N) - Boolean mask used for normalization
-        """
-        # Update Center (using only masked teacher output)
-        if teacher_patches.numel() > 0:
-            self.update_center(teacher_patches)
-
-        # Compute Logits & Probabilities on flattened tensors
+        # Student Log-Softmax
         s_logits = student_patches / self.student_temp
         s_log_probs = F.log_softmax(s_logits, dim=-1)
-        t_out_centered = teacher_patches - self.center
-        t_probs = F.softmax(t_out_centered / teacher_temp, dim=-1).detach()
 
-        # Calculate Cross Entropy per token
-        loss_per_token = torch.sum(-t_probs * s_log_probs, dim=-1) # (Total_Masked,)
+        # Teacher Sinkhorn (replacing simple softmax)
+        t_probs = self.sinkhorn_knopp_teacher(teacher_patches, teacher_temp).detach()
 
-        # Normalize (Mean per image, then Mean over batch)
-        n_masked_per_image = masks.sum(dim=1).clamp(min=1.0) # (B,)
+        # Cross Entropy
+        loss_per_token = torch.sum(-t_probs * s_log_probs, dim=-1)
+
+        # Weighted Mean
+        n_masked_per_image = masks.sum(dim=1).clamp(min=1.0)
         weights_per_image = 1.0 / n_masked_per_image
-        weights_expanded = weights_per_image.unsqueeze(1).expand_as(masks) # (B, N)
-        weights_flat = weights_expanded[masks.bool()] # (Total_Masked,)
+        weights_expanded = weights_per_image.unsqueeze(1).expand_as(masks)
+        weights_flat = weights_expanded[masks.bool()]
 
-        # Weighted mean
-        return (loss_per_token * weights_flat).sum() / masks.shape[0] # Divide by Batch Size
+        return (loss_per_token * weights_flat).sum() / masks.shape[0]
 
 
 class GramLoss(nn.Module):
