@@ -104,37 +104,36 @@ class iBOTPatchLoss(nn.Module):
             batch_center = batch_center / len(teacher_output)
         self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
-    def forward(self, student_patches, teacher_patches, student_masks_flat, teacher_temp):
+    def forward(self, student_patches, teacher_patches, masks, teacher_temp):
         """
-        student_patches: (B, N, K)
-        teacher_patches: (B, N, K)
-        student_masks_flat: (B, N) - Boolean mask where True indicates MASKED
+        Efficient implementation that expects flattened, MASKED-ONLY tokens.
+        
+        Args:
+            student_patches: (Total_Masked_Tokens, K) - Output of student head
+            teacher_patches: (Total_Masked_Tokens, K) - Output of teacher head
+            masks: (B, N) - Boolean mask used for normalization
         """
-        # Compute Centering and Softmax on the FULL tensors first
-        # Student logits (B, N, K)
-        s_logits = student_patches / self.student_temp
+        # Update Center (using only masked teacher output)
+        if teacher_patches.numel() > 0:
+            self.update_center(teacher_patches)
 
-        # Teacher probabilities (B, N, K) - Centered
+        # Compute Logits & Probabilities on flattened tensors
+        s_logits = student_patches / self.student_temp
+        s_log_probs = F.log_softmax(s_logits, dim=-1)
         t_out_centered = teacher_patches - self.center
         t_probs = F.softmax(t_out_centered / teacher_temp, dim=-1).detach()
 
-        # Update Center using only the MASKED patches
-        mask_bool = student_masks_flat.bool()
-        t_masked = teacher_patches[mask_bool]
+        # Calculate Cross Entropy per token
+        loss_per_token = torch.sum(-t_probs * s_log_probs, dim=-1) # (Total_Masked,)
 
-        if t_masked.numel() > 0:
-            self.update_center(t_masked)
+        # Normalize (Mean per image, then Mean over batch)
+        n_masked_per_image = masks.sum(dim=1).clamp(min=1.0) # (B,)
+        weights_per_image = 1.0 / n_masked_per_image
+        weights_expanded = weights_per_image.unsqueeze(1).expand_as(masks) # (B, N)
+        weights_flat = weights_expanded[masks.bool()] # (Total_Masked,)
 
-        # Calculate Cross Entropy Loss per patch (B, N)
-        loss_per_patch = torch.sum(-t_probs * F.log_softmax(s_logits, dim=-1), dim=-1)
-
-        # Apply Mask and Average per Image
-        # Zero out losses for unmasked patches
-        loss_masked = loss_per_patch * student_masks_flat.float()
-        n_masked_per_image = student_masks_flat.sum(dim=1).clamp(min=1.0)
-        loss_per_image = loss_masked.sum(dim=1) / n_masked_per_image
-
-        return loss_per_image.mean()
+        # Weighted mean
+        return (loss_per_token * weights_flat).sum() / masks.shape[0] # Divide by Batch Size
 
 
 class GramLoss(nn.Module):

@@ -214,7 +214,6 @@ class Trainer:
                 {'params': not_regularized, 'weight_decay': 0.0}]
 
     def train_one_epoch(self, epoch_index):
-        # CRITICAL: Set epoch for sampler shuffling
         if self.sampler is not None:
             self.sampler.set_epoch(epoch_index)
 
@@ -263,7 +262,8 @@ class Trainer:
                 with torch.no_grad():
                     teacher_output, teacher_patches_list, _ = self.teacher(global_crops)
                     t_patches = torch.cat(teacher_patches_list, dim=0) # (2*B, N, D)
-                    t_ibot_out = self.teacher_ibot_head(t_patches) # (2*B, N, K)
+                    t_patches_masked = t_patches[masks.bool()] # (Total_Masked_Tokens, D)
+                    t_ibot_out = self.teacher_ibot_head(t_patches_masked) # (Total_Masked_Tokens, K)
 
                 # STUDENT: Sees MASKED Global + FULL Local
                 # We need to reconstruct the list for MultiCropWrapper
@@ -277,8 +277,9 @@ class Trainer:
 
                 # iBOT Loss (Patch tokens)
                 # Select only the global crop patches from student output (first 2 items)
-                s_global_patches = student_patches_list[0]
-                s_ibot_out = self.student_ibot_head(s_global_patches)   # (2*B, N, K)
+                s_global_patches = student_patches_list[0] # (2*B, N, D)
+                s_patches_masked = s_global_patches[masks.bool()] # (Total_Masked_Tokens, D)
+                s_ibot_out = self.student_ibot_head(s_patches_masked) # (Total_Masked_Tokens, K)
                 loss_ibot = self.ibot_loss_fn(
                     s_ibot_out,
                     t_ibot_out,
