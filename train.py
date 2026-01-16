@@ -71,7 +71,7 @@ class Trainer:
         # --- Hyperparameters ---
         self.output_dim = 1024  # Original 65536 vector is too large for our batch size
         self.batch_size = 85  # Per GPU
-        self.base_lr = 0.0005 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
+        self.base_lr = 0.0002 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
         self.min_lr = 1e-6
         self.weight_decay = 0.04
         self.epochs = 100
@@ -296,7 +296,7 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=3.0)
+            torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=1.0)
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
@@ -315,7 +315,7 @@ class Trainer:
             if self.rank == 0 and i % 10 == 0:
                 logger.info(f"Epoch {epoch_index} [{i}/{len(self.loader)}] "
                       f"lr: {current_lr:.6f}, temp: {self.teacher_temp_schedule[it]:.4f}, "
-                      f"m: {self.momentum_schedule[it]:.4f}, wd: {self.wd_schedule[it]:.4f} "
+                      f"m: {self.momentum_schedule[it]:.4f}, wd: {self.wd_schedule[it]:.4f}, "
                       f"DINO: {loss_dino.item():.4f}, IBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
 
             # Manually delete heavy tensors to free VRAM for the next iteration

@@ -163,10 +163,10 @@ class SonarDataTransform:
         ])
 
         self.intensity_trans = v2.Compose([
-            v2.RandomApply([
-                v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0, hue=0)
-            ], p=0.8),
-            v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.2),
+            # v2.RandomApply([
+            #     v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0, hue=0)
+            # ], p=0.8),
+            # v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.2),
             # Custom Gaussian Noise for speckle robustness
             # GaussianNoise(sigma=0.05, p=0.5), 
             ClampTransform(),
