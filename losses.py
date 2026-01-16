@@ -115,21 +115,45 @@ class GramLoss(nn.Module):
 
 
 class KoLeoLoss(nn.Module):
-    """
-    Kozachenko-Leonenko differential entropy estimator.
-    """
     def __init__(self, eps=1e-8):
         super().__init__()
         self.eps = eps
+        self.pdist = nn.PairwiseDistance(2, eps=eps)
 
     def forward(self, student_output):
         x = F.normalize(student_output, dim=-1, p=2)
-        
-        dists_matrix = torch.cdist(x, x)
-        dists_matrix = dists_matrix.clone()
-        dists_matrix.fill_diagonal_(float('inf'))
 
-        min_dists, _ = torch.min(dists_matrix, dim=1)
-        loss = -torch.log(min_dists + self.eps).mean()
+        # Gather all features from other GPUs
+        if dist.is_initialized():
+            # Gather all tensors
+            gathered_x = [torch.zeros_like(x) for _ in range(dist.get_world_size())]
+            dist.all_gather(gathered_x, x)
+            all_x = torch.cat(gathered_x, dim=0)
 
-        return loss
+            # Identify which part of the global batch is local
+            # We compute gradients only for local x, but use all_x for neighbor search
+            rank = dist.get_rank()
+        else:
+            all_x = x
+
+        # Compute dot products between LOCAL features and GLOBAL features
+        # shape: (Local_B, Global_B)
+        dots = torch.mm(x, all_x.t()) 
+
+        # Mask the diagonal (self-matches)
+        # The diagonal for the local batch corresponds to indices [rank*B : (rank+1)*B]
+        if dist.is_initialized():
+            rank = dist.get_rank()
+            start_idx = rank * x.shape[0]
+            # Mask the specific self-correlations
+            for i in range(x.shape[0]):
+                dots[i, start_idx + i] = -1.0
+        else:
+            dots.view(-1)[:: (x.shape[0] + 1)].fill_(-1)
+
+        # Find nearest neighbor in the global batch
+        _, indices = torch.max(dots, dim=1)
+        nearest_neighbors = all_x[indices]
+        distances = self.pdist(x, nearest_neighbors)
+
+        return -torch.log(distances + self.eps).mean()

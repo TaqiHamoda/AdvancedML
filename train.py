@@ -69,7 +69,7 @@ class Trainer:
             logger.info(f"Training on {self.device} (World Size: {self.world_size})")
 
         # --- Hyperparameters ---
-        self.output_dim = 1024  # Original 65536 vector is too large for our batch size
+        self.output_dim = 128  # Original 65536 vector is too large for our batch size
         self.batch_size = 85  # Per GPU
         self.base_lr = 0.0002 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
         self.min_lr = 1e-6
