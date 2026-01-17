@@ -61,6 +61,10 @@ class DINOLoss(nn.Module):
         n_teacher_crops = 2
         B = teacher_output.shape[0] // n_teacher_crops
 
+        # Cast to float32 to prevent overflow
+        student_output = student_output.float()
+        teacher_output = teacher_output.float()
+
         # Center the Teacher Logits
         # teacher_output is (T*B, D)
         teacher_out_centered = teacher_output - self.center

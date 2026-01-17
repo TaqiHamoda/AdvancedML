@@ -103,9 +103,9 @@ def main():
             # Concatenate along channel dimension
             # 192 + 384 + 768 = 1344 dimensions
             hypercolumn = torch.cat(resized_feats, dim=1) # (1, 1344, H8, W8)
-            
+
             # Flatten to (N_pixels, 1344)
-            features_flat = hypercolumn.permute(0, 2, 3, 1).flatten(0, 2).cpu().numpy()
+            features_flat = F.normalize(hypercolumn.permute(0, 2, 3, 1).flatten(0, 2), dim=1).cpu().numpy()
 
             all_features.append(features_flat)
             metadata.append({
