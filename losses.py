@@ -26,12 +26,14 @@ class SinkhornKnopp(nn.Module):
         Q /= sum_Q + self.eps
 
         for _ in range(self.n_iterations):
-            sum_of_rows = torch.sum(Q, dim=1, keepdim=True)
+            row_sum = torch.sum(Q, dim=1, keepdim=True)
             if dist.is_initialized():
-                dist.all_reduce(sum_of_rows)
-            Q /= sum_of_rows + self.eps
+                dist.all_reduce(row_sum)
+            Q /= row_sum + self.eps
             Q /= K
-            Q /= torch.sum(Q, dim=0, keepdim=True)
+
+            col_sum = torch.sum(Q, dim=0, keepdim=True)
+            Q /= col_sum + self.eps
             Q /= B
 
         Q *= B 
