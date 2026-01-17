@@ -175,11 +175,11 @@ class SonarDataTransform:
         # Brightness corresponds to sonar gain (intensity)
         # Contrast corresponds to dynamic range of reciever
         self.intensity_trans = v2.Compose([
-            # v2.RandomApply([
-            #     v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0, hue=0)
-            # ], p=0.8),
-            # v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.2),
-            # GaussianNoise(sigma=0.05, p=0.5),  # Gaussian Noise to simulate speckle noise
+            v2.RandomApply([
+                v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0, hue=0)
+            ], p=0.8),
+            v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.2),
+            GaussianNoise(sigma=0.05, p=0.5),  # Gaussian Noise to simulate speckle noise
             NormalizeTransform(),
         ])
 
