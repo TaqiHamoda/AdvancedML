@@ -136,6 +136,29 @@ class ConvNeXtTiny(nn.Module):
 
         return x_cls, x_patch
 
+    def get_features_stages(self, x):
+        # ConvNeXt has 4 stages.
+        # Stage 0: 1/4 scale, 96 dim (Low level features)
+        # Stage 1: 1/8 scale, 192 dim (Mid level) -> We start here
+        # Stage 2: 1/16 scale, 384 dim
+        # Stage 3: 1/32 scale, 768 dim (High semantic)
+
+        # features[0]: (B, 192, H/8,  W/8)
+        # features[1]: (B, 384, H/16, W/16)
+        # features[2]: (B, 768, H/32, W/32)
+
+        features = []
+        for i in range(4):
+            x = self.downsample_layers[i](x)
+            x = self.stages[i](x)
+
+            # Collect outputs from Stage 1, 2, and 3
+            if i >= 1:
+                norm_x = F.normalize(x, dim=1)
+                features.append(norm_x)
+
+        return features
+
 
 class DINOHead(nn.Module):
     def __init__(self, in_dim, out_dim, use_bn=False, norm_last_layer=True, nlayers=3, hidden_dim=2048, bottleneck_dim=256):
