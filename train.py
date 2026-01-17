@@ -338,7 +338,7 @@ class Trainer:
         if self.rank == 0: logger.info(f"Loading checkpoint from {checkpoint_path}")
 
         # Load on CPU first to avoid OOM, then move to device
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         if self.is_distributed:
             self.student.module.load_state_dict(checkpoint['student'])
             self.student_ibot_head.module.load_state_dict(checkpoint['student_ibot_head'])

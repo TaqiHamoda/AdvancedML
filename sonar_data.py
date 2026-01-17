@@ -8,9 +8,19 @@ from torchvision.transforms import v2
 logger = logging.getLogger(__name__)
 
 
-class ClampTransform(torch.nn.Module):
+class NormalizeTransform(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        # Normalize inputs (centering around 0 for neural net stability)
+        # Input is in [0, 1], (x - 0.5)/0.5 puts data in [-1, 1]
+        self.transform = v2.Compose([
+            lambda x: torch.clamp(x, 0, 1),
+            v2.Normalize(mean=[0.5], std=[0.5])
+        ])
+
     def forward(self, img):
-        return torch.clamp(img, 0, 1)
+        return self.transform(img)
 
 
 class GaussianNoise(torch.nn.Module):
@@ -162,17 +172,15 @@ class SonarDataTransform:
             v2.RandomVerticalFlip(p=0.5),
         ])
 
+        # Brightness corresponds to sonar gain (intensity)
+        # Contrast corresponds to dynamic range of reciever
         self.intensity_trans = v2.Compose([
             # v2.RandomApply([
             #     v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0, hue=0)
             # ], p=0.8),
             # v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.2),
-            # Custom Gaussian Noise for speckle robustness
-            # GaussianNoise(sigma=0.05, p=0.5), 
-            ClampTransform(),
-            # Normalize inputs (centering around 0 for neural net stability)
-            # Assuming [0,1] input, (x - 0.5)/0.5 puts data in [-1, 1]
-            v2.Normalize(mean=[0.5], std=[0.5]), 
+            # GaussianNoise(sigma=0.05, p=0.5),  # Gaussian Noise to simulate speckle noise
+            NormalizeTransform(),
         ])
 
     def __call__(self, image):
