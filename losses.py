@@ -41,6 +41,11 @@ class SinkhornKnopp(nn.Module):
 
 
 class DINOLoss(SinkhornKnopp):
+    def __init__(self, out_dim, student_temp=0.1, center_momentum=0.9, warmup_teacher_temp=0.04):
+        super().__init__(student_temp=student_temp)
+        self.center_momentum = center_momentum
+        self.register_buffer("center", torch.zeros(1, out_dim))
+
     def forward(self, student_output, teacher_output, teacher_temp):
         """
         Args:
@@ -49,6 +54,9 @@ class DINOLoss(SinkhornKnopp):
             teacher_temp: scalar temperature
         """
         n_teacher_crops = 2
+
+        # Apply centering to raw logits to prevent collapse
+        teacher_output_centered = teacher_output - self.center
         B = teacher_output.shape[0] // n_teacher_crops
         n_student_crops = student_output.shape[0] // B
 
@@ -57,12 +65,11 @@ class DINOLoss(SinkhornKnopp):
         s_out = s_out.view(n_student_crops, B, -1)
         s_log_probs = F.log_softmax(s_out, dim=-1) 
 
-        # Teacher: Sinkhorn-Knopp centering + sharpening
-        t_probs = self.sinkhorn_knopp_teacher(teacher_output, teacher_temp)
+        # Teacher: Sinkhorn-Knopp on CENTERED output
+        t_probs = self.sinkhorn_knopp_teacher(teacher_output_centered, teacher_temp)
         t_probs = t_probs.view(n_teacher_crops, B, -1).detach()
 
         # Cross-Entropy Loss
-        # "s b k, t b k -> s t" sum over batch and embedding dim
         loss_matrix = -torch.einsum("sbk,tbk->st", s_log_probs, t_probs)
 
         # Remove diagonal (same crop comparison)
@@ -73,6 +80,16 @@ class DINOLoss(SinkhornKnopp):
         normalization = B * (n_student_crops * n_teacher_crops - min_crops)
 
         return total_loss / normalization
+
+    @torch.no_grad()
+    def update_center(self, teacher_output):
+        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
+        if dist.is_initialized():
+            dist.all_reduce(batch_center)
+            batch_center = batch_center / dist.get_world_size()
+
+        batch_center = batch_center / len(teacher_output)
+        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
 
 class iBOTPatchLoss(SinkhornKnopp):

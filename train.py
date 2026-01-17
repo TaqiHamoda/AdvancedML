@@ -186,7 +186,7 @@ class Trainer:
             self.student_ibot_head = DDP(self.student_ibot_head, device_ids=[self.local_rank])
 
         # --- Losses ---
-        self.dino_loss_fn = DINOLoss().to(self.device)
+        self.dino_loss_fn = DINOLoss(out_dim=self.output_dim).to(self.device)
         self.ibot_loss_fn = iBOTPatchLoss().to(self.device)
         self.gram_loss_fn = GramLoss().to(self.device)
         self.koleo_loss_fn = KoLeoLoss().to(self.device)
@@ -261,6 +261,8 @@ class Trainer:
                     t_patches = torch.cat(teacher_patches_list, dim=0)  # (2*B, N, D)
                     t_patches_masked = t_patches[masks.bool()]  # (Total_Masked_Tokens, D)
                     t_ibot_out = self.teacher_ibot_head(t_patches_masked)  # (Total_Masked_Tokens, K)
+
+                    self.dino_loss_fn.update_center(teacher_output)  # Update center
 
                 # STUDENT: Sees MASKED Global + FULL Local
                 # We need to reconstruct the list for MultiCropWrapper
