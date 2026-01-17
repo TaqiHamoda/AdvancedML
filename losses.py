@@ -5,10 +5,11 @@ import torch.distributed as dist
 
 
 class SinkhornKnopp(nn.Module):
-    def __init__(self, student_temp=0.1, n_iterations=3):
+    def __init__(self, student_temp=0.1, n_iterations=3, eps=1e-6):
         super().__init__()
         self.student_temp = student_temp
         self.n_iterations = n_iterations
+        self.eps = eps
 
     @torch.no_grad()
     def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp):
@@ -22,13 +23,13 @@ class SinkhornKnopp(nn.Module):
         sum_Q = torch.sum(Q)
         if dist.is_initialized():
             dist.all_reduce(sum_Q)
-        Q /= sum_Q
+        Q /= sum_Q + self.eps
 
         for _ in range(self.n_iterations):
             sum_of_rows = torch.sum(Q, dim=1, keepdim=True)
             if dist.is_initialized():
                 dist.all_reduce(sum_of_rows)
-            Q /= sum_of_rows
+            Q /= sum_of_rows + self.eps
             Q /= K
             Q /= torch.sum(Q, dim=0, keepdim=True)
             Q /= B
@@ -145,8 +146,7 @@ class KoLeoLoss(nn.Module):
         if dist.is_initialized():
             rank = dist.get_rank()
             start_idx = rank * x.shape[0]
-            # Mask the specific self-correlations
-            for i in range(x.shape[0]):
+            for i in range(x.shape[0]):  # Mask the specific self-correlations
                 dots[i, start_idx + i] = -1.0
         else:
             dots.view(-1)[:: (x.shape[0] + 1)].fill_(-1)

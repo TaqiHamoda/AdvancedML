@@ -330,15 +330,53 @@ class Trainer:
 
             torch.cuda.empty_cache()
 
-    def run(self):
+    def load_checkpoint(self, checkpoint_path):
+        if checkpoint_path is None or not os.path.isfile(checkpoint_path):
+            if self.rank == 0: logger.warning(f"Checkpoint not found at {checkpoint_path}")
+            return -1
+
+        if self.rank == 0: logger.info(f"Loading checkpoint from {checkpoint_path}")
+
+        # Load on CPU first to avoid OOM, then move to device
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        if self.is_distributed:
+            self.student.module.load_state_dict(checkpoint['student'])
+            self.student_ibot_head.module.load_state_dict(checkpoint['student_ibot_head'])
+        else:
+            self.student.load_state_dict(checkpoint['student'])
+            self.student_ibot_head.load_state_dict(checkpoint['student_ibot_head'])
+
+        self.teacher.load_state_dict(checkpoint['teacher'])
+        self.teacher_ibot_head.load_state_dict(checkpoint['teacher_ibot_head'])
+
+        self.optimizer.load_state_dict(checkpoint['optimizer'])
+        self.scaler.load_state_dict(checkpoint['scaler'])
+
+        epoch = checkpoint['epoch']
+
+        # Free memory
+        del checkpoint
+        torch.cuda.empty_cache()
+
+        return epoch
+
+    def run(self, resume_path=None):
+        start_epoch = 0
+
+        loaded_data = self.load_checkpoint(resume_path)
+        if loaded_data > -1:
+            start_epoch = loaded_data
+            if self.rank == 0: 
+                logger.info(f"Resuming training from epoch {start_epoch}")
+
         if self.rank == 0:
             logger.info(f"Model collapse happens at DINO loss value: ln({self.output_dim}) ~ {np.log(self.output_dim):.2f}")
             logger.info("Starting training...")
 
         # Use simple range, tqdm only on master to avoid messed up bars
-        iterator = range(self.epochs)
+        iterator = range(start_epoch, self.epochs)
         if self.rank == 0:
-            iterator = tqdm(iterator, desc="Training Epochs")
+            iterator = tqdm(iterator, desc="Training Epochs", initial=start_epoch, total=self.epochs)
 
         for epoch in iterator:
             self.train_one_epoch(epoch)
@@ -346,10 +384,14 @@ class Trainer:
                 save_dict = {
                     'epoch': epoch,
                     'student': self.student.module.state_dict() if self.is_distributed else self.student.state_dict(),
+                    'student_ibot_head': self.student_ibot_head.module.state_dict() if self.is_distributed else self.student_ibot_head.state_dict(),
                     'teacher': self.teacher.state_dict(),
+                    'teacher_ibot_head': self.teacher_ibot_head.state_dict(),
                     'optimizer': self.optimizer.state_dict(),
+                    'scaler': self.scaler.state_dict(),
                 }
                 torch.save(save_dict, f"weights/checkpoint_{epoch}.pth")
+                torch.save(save_dict, f"weights/checkpoint_latest.pth")
 
         if self.is_distributed:
             dist.destroy_process_group()
@@ -369,4 +411,9 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.ERROR)  # Silence other processes
 
     trainer = Trainer()
-    trainer.run()
+
+    resume_file = "weights/checkpoint_latest.pth"
+    if os.path.exists(resume_file):
+        trainer.run(resume_path=resume_file)
+    else:
+        trainer.run()
