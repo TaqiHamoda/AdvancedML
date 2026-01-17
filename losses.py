@@ -40,9 +40,14 @@ class SinkhornKnopp(nn.Module):
         return Q.t()
 
 
-class DINOLoss(SinkhornKnopp):
-    def __init__(self, out_dim, student_temp=0.1, center_momentum=0.9, warmup_teacher_temp=0.04):
-        super().__init__(student_temp=student_temp)
+class DINOLoss(nn.Module):
+    """
+    DINOv1-style Loss: Centering + Softmax. 
+    More stable for small batch sizes (B < K).
+    """
+    def __init__(self, out_dim, student_temp=0.1, center_momentum=0.9):
+        super().__init__()
+        self.student_temp = student_temp
         self.center_momentum = center_momentum
         self.register_buffer("center", torch.zeros(1, out_dim))
 
@@ -54,20 +59,23 @@ class DINOLoss(SinkhornKnopp):
             teacher_temp: scalar temperature
         """
         n_teacher_crops = 2
-
-        # Apply centering to raw logits to prevent collapse
-        teacher_output_centered = teacher_output - self.center
         B = teacher_output.shape[0] // n_teacher_crops
+
+        # Center the Teacher Logits
+        # teacher_output is (T*B, D)
+        teacher_out_centered = teacher_output - self.center
+
+        # Apply Softmax to Teacher
+        t_probs = F.softmax(teacher_out_centered / teacher_temp, dim=-1).detach()
+
+        # Student Log-Softmax
+        s_out = student_output / self.student_temp
+        s_log_probs = F.log_softmax(s_out, dim=-1)
+
+        # Reshape to (n_crops, B, D)
         n_student_crops = student_output.shape[0] // B
-
-        # Student: Log-Softmax with temperature
-        s_out = (student_output / self.student_temp).float()
-        s_out = s_out.view(n_student_crops, B, -1)
-        s_log_probs = F.log_softmax(s_out, dim=-1) 
-
-        # Teacher: Sinkhorn-Knopp on CENTERED output
-        t_probs = self.sinkhorn_knopp_teacher(teacher_output_centered, teacher_temp)
-        t_probs = t_probs.view(n_teacher_crops, B, -1).detach()
+        t_probs = t_probs.view(n_teacher_crops, B, -1)
+        s_log_probs = s_log_probs.view(n_student_crops, B, -1)
 
         # Cross-Entropy Loss
         loss_matrix = -torch.einsum("sbk,tbk->st", s_log_probs, t_probs)
@@ -83,6 +91,9 @@ class DINOLoss(SinkhornKnopp):
 
     @torch.no_grad()
     def update_center(self, teacher_output):
+        """
+        Update center with Exponential Moving Average (EMA).
+        """
         batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
         if dist.is_initialized():
             dist.all_reduce(batch_center)

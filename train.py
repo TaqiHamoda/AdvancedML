@@ -367,7 +367,7 @@ class Trainer:
 
         loaded_data = self.load_checkpoint(resume_path)
         if loaded_data > -1:
-            start_epoch = loaded_data
+            start_epoch = loaded_data + 1
             if self.rank == 0: 
                 logger.info(f"Resuming training from epoch {start_epoch}")
 
