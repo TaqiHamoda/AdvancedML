@@ -180,14 +180,10 @@ class DINOHead(nn.Module):
             layers.append(nn.Linear(hidden_dim, bottleneck_dim))
             self.mlp = nn.Sequential(*layers)
 
-        self.apply(self._init_weights)
+        self.last_layer = nn.Linear(bottleneck_dim, out_dim, bias=False)
+        self.norm_last_layer = norm_last_layer
 
-        # The last layer (prototypes) requires Weight Normalization in DINO
-        self.last_layer = nn.utils.parametrizations.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
-        with torch.no_grad():
-            self.last_layer.parametrizations.weight.original0.fill_(1)  # original0 is magnitude. original1 is direction
-            if norm_last_layer:
-                self.last_layer.parametrizations.weight.original0.requires_grad = False
+        self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -198,7 +194,14 @@ class DINOHead(nn.Module):
     def forward(self, x):
         x = self.mlp(x)
         x = F.normalize(x, dim=-1, p=2) # L2 normalize bottleneck
-        x = self.last_layer(x)
+
+        if self.norm_last_layer:
+            # Manually apply weight normalization (L2 norm of weight vector = 1)
+            w = F.normalize(self.last_layer.weight, p=2, dim=1)
+            x = F.linear(x, w)
+        else:
+            x = self.last_layer(x)
+
         return x
 
 

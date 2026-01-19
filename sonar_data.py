@@ -13,10 +13,10 @@ class NormalizeTransform(torch.nn.Module):
         super().__init__()
 
         # Normalize inputs (centering around 0 for neural net stability)
-        # Input is in [0, 1], (x - 0.5)/0.5 puts data in [-1, 1]
+        # Input is in [0, 1]. Mean and std are based on dataset stats
         self.transform = v2.Compose([
             lambda x: torch.clamp(x, 0, 1),
-            v2.Normalize(mean=[0.5], std=[0.5])
+            v2.Normalize(mean=[0.6379], std=[0.0944])
         ])
 
     def forward(self, img):
