@@ -43,14 +43,14 @@ class MaskingGenerator:
     def __init__(
         self,
         input_size=(224, 224),
-        patch_size=32,
+        stride_size=32,
         mask_ratio=0.5,
         min_num_patches=4,     # Minimum size of a single block
         max_num_patches=None,  # Max size of a single block (defaults to varying)
         min_aspect=0.3,        # Min aspect ratio of block
         max_aspect=None,       # Max aspect ratio of block
     ):
-        self.height, self.width = input_size[0] // patch_size, input_size[1] // patch_size
+        self.height, self.width = input_size[0] // stride_size, input_size[1] // stride_size
         self.num_patches = self.height * self.width
         self.num_masking_patches = int(mask_ratio * self.num_patches)
 

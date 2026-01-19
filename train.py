@@ -74,8 +74,10 @@ class Trainer:
         if self.rank == 0:
             logger.info(f"Training on {self.device} (World Size: {self.world_size})")
 
-        # --- Hyperparameters ---
         self.output_dim = 4096  # Original 65536 vector is too large for our batch size
+        self.stride_size = 8
+
+        # --- Hyperparameters ---
         self.batch_size = 85  # Per GPU
         self.base_lr = 0.0005 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
         self.min_lr = 1e-6
@@ -93,10 +95,10 @@ class Trainer:
         self.w_dino = 1.0
         self.w_ibot = 1.0
         self.w_gram = 1.0
-        self.w_koleo = 0.1
+        self.w_koleo = 0.001
 
         # --- Masking, Data & Sampler ---
-        self.mask_generator = MaskingGenerator(input_size=(224, 224), patch_size=32, mask_ratio=0.5)
+        self.mask_generator = MaskingGenerator(input_size=(224, 224), stride_size=self.stride_size, mask_ratio=0.5)
         dataset = SonarDataset(data_dir="./dataset", ext="*.npy")
         transform = SonarDataTransform(local_crops_number=8)
         
@@ -249,10 +251,9 @@ class Trainer:
                 masks_list.append(torch.from_numpy(m).bool())
             masks = torch.stack(masks_list).to(self.device)  # (2*B, N_patches)
 
-            # We need to upsample the mask from (7x7) to (224x224) to zero out pixels
-            # ConvNeXt stride is 32.
-            mask_grid_h = 224 // 32 
-            mask_grid_w = 224 // 32
+            # We need to upsample the mask from (28x28) to (224x224) to zero out pixels
+            mask_grid_h = 224 // self.stride_size 
+            mask_grid_w = 224 // self.stride_size
 
             # Reshape to (2*B, 1, 7, 7)
             masks_spatial = masks.view(-1, 1, mask_grid_h, mask_grid_w)
@@ -323,7 +324,7 @@ class Trainer:
 
             # Log only on Master
             if self.rank == 0 and i % 10 == 0:
-                logger.info(f"Epoch {epoch_index} [{i}/{len(self.loader)}] "
+                logger.info(f"Epoch {epoch_index:04d} [{i}/{len(self.loader)}] "
                       f"lr: {current_lr:.6f}, temp: {self.teacher_temp_schedule[it]:.4f}, "
                       f"m: {self.momentum_schedule[it]:.4f}, wd: {self.wd_schedule[it]:.4f}, "
                       f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
