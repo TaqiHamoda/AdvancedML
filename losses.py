@@ -154,9 +154,6 @@ class iBOTPatchLoss(Centering):
 
 
 class GramLoss(nn.Module):
-    """
-    Matches the texture/autocorrelation of features between Student and Teacher.
-    """
     def __init__(self):
         super().__init__()
         self.mse = nn.MSELoss()
@@ -165,11 +162,15 @@ class GramLoss(nn.Module):
         student_patches = F.normalize(student_patches, dim=-1)
         teacher_patches = F.normalize(teacher_patches, dim=-1)
 
-        student_gram = torch.bmm(student_patches, student_patches.transpose(1, 2))
-        teacher_gram = torch.bmm(teacher_patches, teacher_patches.transpose(1, 2))
+        # Transpose to (B, D, N) to compute Channel correlations (D x D)
+        # Result: (B, D, D)
+        student_gram = torch.bmm(student_patches.transpose(1, 2), student_patches)
+        teacher_gram = torch.bmm(teacher_patches.transpose(1, 2), teacher_patches)
 
-        student_gram = student_gram.clamp(min=0)
-        teacher_gram = teacher_gram.clamp(min=0)
+        # Divide by N to make loss invariant to patch count (resolution)
+        N = student_patches.shape[1]
+        student_gram = student_gram.clamp(min=0) / N
+        teacher_gram = teacher_gram.clamp(min=0) / N
 
         return self.mse(student_gram, teacher_gram)
 

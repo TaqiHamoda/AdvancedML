@@ -151,7 +151,7 @@ class ConvNeXtTiny(nn.Module):
 
         # --- Patch Fusion Branch ---
         # Project & Final Normalize
-        x_patch = hypercolumn.flatten(2).transpose(1, 2)   # (N, 196, 1152)
+        x_patch = hypercolumn.flatten(2).transpose(1, 2)   # (N, 196, 1344)
         x_patch = self.fusion_proj(x_patch)                # (N, 196, 768)
         x_patch = self.norm(x_patch)                # Normalized (N, 196, 768)
 
