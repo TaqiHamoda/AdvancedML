@@ -175,9 +175,9 @@ class GramLoss(nn.Module):
 
 
 class KoLeoLoss(nn.Module):
-    def __init__(self, eps=1e-8):
+    def __init__(self, eps=1e-4):
         super().__init__()
-        self.eps = eps
+        self.eps = eps  # Better to use a high epsilon (like 1e-4) to prevent gradient explosion
         self.pdist = nn.PairwiseDistance(2, eps=eps)
 
     def forward(self, student_output):

@@ -140,7 +140,7 @@ class ConvNeXtTiny(nn.Module):
             if hypercolumn is None:
                 hypercolumn = x_i
             else:
-                x_i = F.interpolate(x_i, size=hypercolumn.shape[-2:], mode='nearest-exact')
+                x_i = F.interpolate(x_i, size=hypercolumn.shape[-2:], mode='bilinear')
                 hypercolumn = torch.cat([hypercolumn, x_i], dim=1)
 
         # --- Global CLS Branch ---

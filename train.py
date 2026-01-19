@@ -79,7 +79,7 @@ class Trainer:
 
         # --- Hyperparameters ---
         self.batch_size = 64  # Max possible per GPU
-        self.effective_batch_size = 1024  # Desired batch size
+        self.effective_batch_size = 4096 // self.world_size  # Desired batch size
         self.accum_iter = self.effective_batch_size // self.batch_size  # Number of gradient accumulation steps
         self.base_lr = 0.0005 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
         self.min_lr = 1e-6
@@ -97,7 +97,7 @@ class Trainer:
         self.w_dino = 1.0
         self.w_ibot = 1.0
         self.w_gram = 1.0
-        self.w_koleo = 0.001
+        self.w_koleo = 0.0001
 
         # --- Masking, Data & Sampler ---
         self.mask_generator = MaskingGenerator(input_size=(224, 224), stride_size=self.stride_size, mask_ratio=0.5)
@@ -307,7 +307,7 @@ class Trainer:
                 loss = loss / self.accum_iter  # Normalize loss to account for accumulation
 
             # Log only on Master
-            if self.rank == 0 and i % 10 == 0:
+            if self.rank == 0 and i % self.accum_iter == 0:
                 logger.info(f"Epoch {epoch_index:04d} [{i:04d}/{len(self.loader)}] "
                     f"lr: {current_lr:.6f}, temp: {self.teacher_temp_schedule[it]:.4f}, "
                     f"m: {self.momentum_schedule[it]:.4f}, wd: {self.wd_schedule[it]:.4f}, "
