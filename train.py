@@ -75,7 +75,7 @@ class Trainer:
             logger.info(f"Training on {self.device} (World Size: {self.world_size})")
 
         # --- Hyperparameters ---
-        self.output_dim = 128  # Original 65536 vector is too large for our batch size
+        self.output_dim = 4096  # Original 65536 vector is too large for our batch size
         self.batch_size = 85  # Per GPU
         self.base_lr = 0.0005 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
         self.min_lr = 1e-6
@@ -83,8 +83,8 @@ class Trainer:
         self.epochs = 100
         self.warmup_epochs = self.epochs // 10
 
-        self.teacher_temp_start = 0.1
-        self.teacher_temp_end = 0.2
+        self.teacher_temp_start = 0.04
+        self.teacher_temp_end = 0.07
         self.momentum_teacher_start = 0.992
         self.momentum_teacher_end = 1.0
         self.weight_decay_start = self.weight_decay
@@ -193,7 +193,7 @@ class Trainer:
 
         # --- Losses ---
         self.dino_loss_fn = DINOLoss(out_dim=self.output_dim).to(self.device)
-        self.ibot_loss_fn = iBOTPatchLoss().to(self.device)
+        self.ibot_loss_fn = iBOTPatchLoss(out_dim=self.output_dim).to(self.device)
         self.gram_loss_fn = GramLoss().to(self.device)
         self.koleo_loss_fn = KoLeoLoss().to(self.device)
 
@@ -270,8 +270,6 @@ class Trainer:
                     t_patches = torch.cat(teacher_patches_list, dim=0)  # (2*B, N, D)
                     t_patches_masked = t_patches[masks.bool()]  # (Total_Masked_Tokens, D)
                     t_ibot_out = self.teacher_ibot_head(t_patches_masked)  # (Total_Masked_Tokens, K)
-
-                    self.dino_loss_fn.update_center(teacher_output)  # Update center
 
                 # STUDENT: Sees MASKED Global + FULL Local
                 # We need to reconstruct the list for MultiCropWrapper

@@ -25,12 +25,16 @@ class NormalizeTransform(torch.nn.Module):
 
 class GaussianNoise(torch.nn.Module):
     """Adds Gaussian noise to the tensor to simulate sonar speckle/electronic noise."""
-    def __init__(self, mean=0.0, sigma=0.1):
+    def __init__(self, mean=0.0, sigma=0.1, p=0.5):
         super().__init__()
         self.mean = mean
         self.sigma = sigma
+        self.p = p
 
     def forward(self, img):
+        if torch.rand(1) >= self.p:
+            return img
+
         noise = torch.randn_like(img) * self.sigma + self.mean
         return img + noise
 
@@ -148,7 +152,7 @@ class SonarDataTransform:
     def __init__(
         self,
         global_crops_scale=(0.4, 1.0),
-        local_crops_scale=(0.05, 0.4),
+        local_crops_scale=(0.15, 0.4),
         local_crops_number=8,
         global_crops_size=224,
         local_crops_size=96,
@@ -162,13 +166,12 @@ class SonarDataTransform:
         # Brightness corresponds to sonar gain (intensity)
         # Contrast corresponds to dynamic range of reciever
         self.augmentations = v2.Compose([
-            v2.RandomHorizontalFlip(p=0.5),
-            v2.RandomVerticalFlip(p=0.5),
+            v2.RandomHorizontalFlip(p=0.5),  # No vertical flips since it is impossible for shadows to face sensor
             v2.RandomApply([
-                v2.ColorJitter(brightness=0.05, contrast=0.05, saturation=0, hue=0)
+                v2.ColorJitter(brightness=0.4, contrast=0.4, saturation=0, hue=0)
             ], p=0.3),
-            v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 0.5))], p=0.2),
-            # v2.RandomApply(GaussianNoise(sigma=0.05), p=0.5),  # Gaussian Noise to simulate speckle noise
+            v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 1.5))], p=0.2),
+            GaussianNoise(sigma=0.05, p=0.3),  # Gaussian Noise to simulate speckle noise
             NormalizeTransform(),
         ])
 

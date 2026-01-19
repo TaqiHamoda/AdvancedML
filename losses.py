@@ -5,15 +5,23 @@ import torch.distributed as dist
 
 
 class SinkhornKnopp(nn.Module):
-    def __init__(self, student_temp=0.1, n_iterations=3, eps=1e-6):
+    """
+    DINOv2/3-style Loss: SinkhornKnopp + Softmax. 
+    Better for large batch sizes (B >> K).
+    """
+    def __init__(self, out_dim, student_temp=0.1, n_iterations=3, eps=1e-6):
         super().__init__()
+        self.out_dim = out_dim
         self.student_temp = student_temp
         self.n_iterations = n_iterations
         self.eps = eps
 
     @torch.no_grad()
-    def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp):
+    def get_probs(self, student_output, teacher_output, teacher_temp):
+        # Cast to float32 to prevent overflow
+        student_output = student_output.float()
         teacher_output = teacher_output.float()
+
         world_size = dist.get_world_size() if dist.is_initialized() else 1
 
         # Max normalization for stability
@@ -40,11 +48,16 @@ class SinkhornKnopp(nn.Module):
             Q /= col_sum + self.eps
             Q /= B
 
-        Q *= B 
-        return Q.t()
+        Q *= B
+        t_probs = Q.t()
 
+        # Student Log-Softmax
+        s_out = student_output / self.student_temp
+        s_log_probs = F.log_softmax(s_out, dim=-1)
 
-class DINOLoss(nn.Module):
+        return s_log_probs, t_probs
+
+class Centering(nn.Module):
     """
     DINOv1-style Loss: Centering + Softmax. 
     More stable for small batch sizes (B < K).
@@ -70,15 +83,8 @@ class DINOLoss(nn.Module):
 
         self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
-    def forward(self, student_output, teacher_output, teacher_temp):
-        """
-        Args:
-            student_output: (S * B, D) student logits
-            teacher_output: (T * B, D) teacher logits
-            teacher_temp: scalar temperature
-        """
-        n_teacher_crops = 2
-        B = teacher_output.shape[0] // n_teacher_crops
+    def get_probs(self, student_output, teacher_output, teacher_temp):
+        self.update_center(teacher_output)
 
         # Cast to float32 to prevent overflow
         student_output = student_output.float()
@@ -96,6 +102,22 @@ class DINOLoss(nn.Module):
         # Student Log-Softmax
         s_out = student_output / self.student_temp
         s_log_probs = F.log_softmax(s_out, dim=-1)
+
+        return s_log_probs, t_probs
+
+
+class DINOLoss(Centering):
+    def forward(self, student_output, teacher_output, teacher_temp):
+        """
+        Args:
+            student_output: (S * B, D) student logits
+            teacher_output: (T * B, D) teacher logits
+            teacher_temp: scalar temperature
+        """
+        s_log_probs, t_probs = self.get_probs(student_output, teacher_output, teacher_temp)
+
+        n_teacher_crops = 2
+        B = teacher_output.shape[0] // n_teacher_crops
 
         # Reshape to (n_crops, B, D)
         n_student_crops = student_output.shape[0] // B
@@ -115,14 +137,9 @@ class DINOLoss(nn.Module):
         return total_loss / normalization
 
 
-class iBOTPatchLoss(SinkhornKnopp):
+class iBOTPatchLoss(Centering):
     def forward(self, student_patches, teacher_patches, masks, teacher_temp):
-        # Student Log-Softmax
-        s_logits = student_patches / self.student_temp
-        s_log_probs = F.log_softmax(s_logits, dim=-1)
-
-        # Teacher Sinkhorn (replacing simple softmax)
-        t_probs = self.sinkhorn_knopp_teacher(teacher_patches, teacher_temp).detach()
+        s_log_probs, t_probs = self.get_probs(student_patches, teacher_patches, teacher_temp)
 
         # Cross Entropy
         loss_per_token = torch.sum(-t_probs * s_log_probs, dim=-1)
