@@ -75,10 +75,12 @@ class Trainer:
             logger.info(f"Training on {self.device} (World Size: {self.world_size})")
 
         self.output_dim = 4096  # Original 65536 vector is too large for our batch size
-        self.stride_size = 8
+        self.stride_size = 16
 
         # --- Hyperparameters ---
-        self.batch_size = 64  # Per GPU
+        self.batch_size = 64  # Max possible per GPU
+        self.effective_batch_size = 1024  # Desired batch size
+        self.accum_iter = self.effective_batch_size // self.batch_size  # Number of gradient accumulation steps
         self.base_lr = 0.0005 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
         self.min_lr = 1e-6
         self.weight_decay = 0.04
@@ -224,6 +226,7 @@ class Trainer:
         if self.sampler is not None:
             self.sampler.set_epoch(epoch_index)
 
+        self.optimizer.zero_grad(set_to_none=True) # Ensure gradients are zero at start
         for i, batch_imgs in enumerate(self.loader):
             it = len(self.loader) * epoch_index + i
 
@@ -301,33 +304,17 @@ class Trainer:
 
                 loss_gram = self.gram_loss_fn(student_patches_list[0], teacher_patches_list[0])
                 loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)
-                # loss = (self.w_ibot * loss_ibot) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)
-
-            # Optimization outside autocast
-            self.optimizer.zero_grad(set_to_none=True)
-            self.scaler.scale(loss).backward()
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=1.0)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-
-            with torch.no_grad():
-                m = self.momentum_schedule[it]
-
-                student_model = self.student.module if self.is_distributed else self.student
-                for param_q, param_k in zip(student_model.parameters(), self.teacher.parameters()):
-                    param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
-
-                student_ibot_head = self.student_ibot_head.module if self.is_distributed else self.student_ibot_head
-                for p_s, p_t in zip(student_ibot_head.parameters(), self.teacher_ibot_head.parameters()):
-                    p_t.data.mul_(m).add_((1 - m) * p_s.detach().data)
+                loss = loss / self.accum_iter  # Normalize loss to account for accumulation
 
             # Log only on Master
             if self.rank == 0 and i % 10 == 0:
-                logger.info(f"Epoch {epoch_index:04d} [{i}/{len(self.loader)}] "
-                      f"lr: {current_lr:.6f}, temp: {self.teacher_temp_schedule[it]:.4f}, "
-                      f"m: {self.momentum_schedule[it]:.4f}, wd: {self.wd_schedule[it]:.4f}, "
-                      f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
+                logger.info(f"Epoch {epoch_index:04d} [{i:04d}/{len(self.loader)}] "
+                    f"lr: {current_lr:.6f}, temp: {self.teacher_temp_schedule[it]:.4f}, "
+                    f"m: {self.momentum_schedule[it]:.4f}, wd: {self.wd_schedule[it]:.4f}, "
+                    f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
+
+            # Backward pass (Accumulates gradients into .grad attributes)
+            self.scaler.scale(loss).backward()
 
             # Manually delete heavy tensors to free VRAM for the next iteration
             del loss, loss_ibot, loss_gram, loss_koleo
@@ -339,7 +326,24 @@ class Trainer:
             del masked_global_inputs, masks_upsampled
             del all_student_crops
 
-            torch.cuda.empty_cache()
+            if (i + 1) % self.accum_iter == 0:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=1.0)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad(set_to_none=True)
+
+                with torch.no_grad():
+                    m = self.momentum_schedule[it]
+
+                    student_model = self.student.module if self.is_distributed else self.student
+                    for param_q, param_k in zip(student_model.parameters(), self.teacher.parameters()):
+                        param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
+
+                    student_ibot_head = self.student_ibot_head.module if self.is_distributed else self.student_ibot_head
+                    for p_s, p_t in zip(student_ibot_head.parameters(), self.teacher_ibot_head.parameters()):
+                        p_t.data.mul_(m).add_((1 - m) * p_s.detach().data)
+
 
     def load_checkpoint(self, checkpoint_path):
         if checkpoint_path is None or not os.path.isfile(checkpoint_path):
