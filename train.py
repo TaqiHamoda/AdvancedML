@@ -34,15 +34,21 @@ def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epoch
 
 
 def dino_collate_fn(batch):
-    output = {'global_crops': [], 'local_crops': []}
-    n_global = len(batch[0]['global_crops'])
-    n_local = len(batch[0]['local_crops'])
+    output = {
+        'teacher': {
+            'global_crops': [],
+            'local_crops': []
+        },
+        'student': {
+            'global_crops': [],
+            'local_crops': []
+        },
+    }
 
-    for i in range(n_global):
-        output['global_crops'].append(torch.stack([item['global_crops'][i] for item in batch]))
-
-    for i in range(n_local):
-        output['local_crops'].append(torch.stack([item['local_crops'][i] for item in batch]))
+    for model in output.keys():
+        for crop in output[model].keys():
+            for i in range(len(batch[0][model][crop])):
+                output[model][crop].append(torch.stack([item[model][crop][i] for item in batch]))
 
     return output
 
@@ -71,15 +77,15 @@ class Trainer:
         # --- Hyperparameters ---
         self.output_dim = 128  # Original 65536 vector is too large for our batch size
         self.batch_size = 85  # Per GPU
-        self.base_lr = 0.0002 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
+        self.base_lr = 0.0005 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
         self.min_lr = 1e-6
         self.weight_decay = 0.04
         self.epochs = 100
         self.warmup_epochs = self.epochs // 10
 
-        self.teacher_temp_start = 0.04
-        self.teacher_temp_end = 0.07
-        self.momentum_teacher_start = 0.996
+        self.teacher_temp_start = 0.1
+        self.teacher_temp_end = 0.2
+        self.momentum_teacher_start = 0.992
         self.momentum_teacher_end = 1.0
         self.weight_decay_start = self.weight_decay
         self.weight_decay_end = 0.4
@@ -227,13 +233,16 @@ class Trainer:
                 # Only apply weight decay to the regularized group (index 0)
                 if param_group['weight_decay'] > 0:
                     param_group['weight_decay'] = current_wd
-            
-            global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['global_crops']]
-            local_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['local_crops']]
+
+            teacher_global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['teacher']['global_crops']]
+            teacher_local_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['teacher']['local_crops']]
+
+            student_global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['student']['global_crops']]
+            student_local_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['student']['local_crops']]
 
             # We only mask global crops for iBOT.
             # Mask shape: (B, N_patches)
-            B = global_crops[0].shape[0]
+            B = student_global_crops[0].shape[0]
             masks_list = []
             for _ in range(B * 2):  # 2 global crops per image
                 m = self.mask_generator()
@@ -252,12 +261,12 @@ class Trainer:
 
             # Create masked input for student
             # We concatenate the two global lists to batch process
-            global_concat = torch.cat(global_crops, dim=0)  # (2*B, 1, 224, 224)
+            global_concat = torch.cat(student_global_crops, dim=0)  # (2*B, 1, 224, 224)
             masked_global_inputs = global_concat * (1 - masks_upsampled)  # Zero out masked areas
 
             with torch.amp.autocast('cuda'):
                 with torch.no_grad():
-                    teacher_output, teacher_patches_list, _ = self.teacher(global_crops)
+                    teacher_output, teacher_patches_list, _ = self.teacher(teacher_global_crops)
                     t_patches = torch.cat(teacher_patches_list, dim=0)  # (2*B, N, D)
                     t_patches_masked = t_patches[masks.bool()]  # (Total_Masked_Tokens, D)
                     t_ibot_out = self.teacher_ibot_head(t_patches_masked)  # (Total_Masked_Tokens, K)
@@ -267,7 +276,7 @@ class Trainer:
                 # STUDENT: Sees MASKED Global + FULL Local
                 # We need to reconstruct the list for MultiCropWrapper
                 masked_global_list = torch.chunk(masked_global_inputs, 2, dim=0)
-                all_student_crops = list(masked_global_list) + local_crops
+                all_student_crops = list(masked_global_list) + student_local_crops
 
                 student_output, student_patches_list, student_cls = self.student(all_student_crops)
 
@@ -286,13 +295,14 @@ class Trainer:
                     current_teacher_temp
                 )
 
-                n_global = len(global_crops)
+                n_global = len(student_global_crops)
                 student_cls_chunked = student_cls.chunk(len(all_student_crops))
                 student_global_cls = torch.cat(student_cls_chunked[:n_global])
                 loss_koleo = self.koleo_loss_fn(student_global_cls)
 
                 loss_gram = self.gram_loss_fn(student_patches_list[0], teacher_patches_list[0])
                 loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)
+                # loss = (self.w_ibot * loss_ibot) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)
 
             # Optimization outside autocast
             self.optimizer.zero_grad(set_to_none=True)
@@ -318,13 +328,13 @@ class Trainer:
                 logger.info(f"Epoch {epoch_index} [{i}/{len(self.loader)}] "
                       f"lr: {current_lr:.6f}, temp: {self.teacher_temp_schedule[it]:.4f}, "
                       f"m: {self.momentum_schedule[it]:.4f}, wd: {self.wd_schedule[it]:.4f}, "
-                      f"DINO: {loss_dino.item():.4f}, IBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
+                      f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
 
             # Manually delete heavy tensors to free VRAM for the next iteration
-            del loss, loss_dino, loss_ibot, loss_gram, loss_koleo
+            del loss, loss_ibot, loss_gram, loss_koleo
             del student_output, teacher_output
             del s_ibot_out, t_ibot_out
-            del global_crops, local_crops, masks
+            del teacher_global_crops, teacher_local_crops, student_global_crops, student_local_crops, masks
             del student_patches_list, teacher_patches_list
             del student_cls
             del masked_global_inputs, masks_upsampled
@@ -372,7 +382,7 @@ class Trainer:
                 logger.info(f"Resuming training from epoch {start_epoch}")
 
         if self.rank == 0:
-            logger.info(f"Model collapse happens at DINO loss value: ln({self.output_dim}) ~ {np.log(self.output_dim):.2f}")
+            logger.info(f"Model collapse happens at DINO/iBOT loss value: ln({self.output_dim}) ~ {np.log(self.output_dim):.2f}")
             logger.info("Starting training...")
 
         # Use simple range, tqdm only on master to avoid messed up bars

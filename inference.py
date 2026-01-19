@@ -12,7 +12,7 @@ from sonar_data import NormalizeTransform, SonarDataset
 
 RESULTS_DIR = "results/"
 WEIGHTS_DIR = "weights/"
-WEIGHT_FILE = "checkpoint_4.pth"
+WEIGHT_FILE = "checkpoint_latest.pth"
 
 N_TILES = 100
 FEATURE_WEIGHTS = (0.1, 0.1, 1)

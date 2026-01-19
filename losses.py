@@ -16,7 +16,11 @@ class SinkhornKnopp(nn.Module):
         teacher_output = teacher_output.float()
         world_size = dist.get_world_size() if dist.is_initialized() else 1
 
-        Q = torch.exp(teacher_output / teacher_temp).t() 
+        # Max normalization for stability
+        log_Q = (teacher_output / teacher_temp).t()  # (K, B*world_size)
+        log_Q = log_Q - log_Q.max(dim=0, keepdim=True)[0]
+
+        Q = torch.exp(log_Q)
         B = Q.shape[1] * world_size 
         K = Q.shape[0] 
 
@@ -51,6 +55,21 @@ class DINOLoss(nn.Module):
         self.center_momentum = center_momentum
         self.register_buffer("center", torch.zeros(1, out_dim))
 
+    @torch.no_grad()
+    def update_center(self, teacher_output):
+        """
+        Update center with Exponential Moving Average (EMA).
+        """
+        if torch.isnan(teacher_output).any():
+            return  # Skip update if NaN detected
+
+        batch_center = torch.mean(teacher_output, dim=0, keepdim=True)
+        if dist.is_initialized():
+            dist.all_reduce(batch_center)
+            batch_center = batch_center / dist.get_world_size()
+
+        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
+
     def forward(self, student_output, teacher_output, teacher_temp):
         """
         Args:
@@ -69,8 +88,10 @@ class DINOLoss(nn.Module):
         # teacher_output is (T*B, D)
         teacher_out_centered = teacher_output - self.center
 
-        # Apply Softmax to Teacher
-        t_probs = F.softmax(teacher_out_centered / teacher_temp, dim=-1).detach()
+        # Apply Softmax to Teacher (max normalization for stability)
+        teacher_logits = teacher_out_centered / teacher_temp
+        teacher_logits = teacher_logits - teacher_logits.max(dim=-1, keepdim=True)[0]
+        t_probs = F.softmax(teacher_logits, dim=-1).detach()
 
         # Student Log-Softmax
         s_out = student_output / self.student_temp
@@ -92,19 +113,6 @@ class DINOLoss(nn.Module):
         normalization = B * (n_student_crops * n_teacher_crops - min_crops)
 
         return total_loss / normalization
-
-    @torch.no_grad()
-    def update_center(self, teacher_output):
-        """
-        Update center with Exponential Moving Average (EMA).
-        """
-        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
-        if dist.is_initialized():
-            dist.all_reduce(batch_center)
-            batch_center = batch_center / dist.get_world_size()
-
-        batch_center = batch_center / len(teacher_output)
-        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
 
 class iBOTPatchLoss(SinkhornKnopp):

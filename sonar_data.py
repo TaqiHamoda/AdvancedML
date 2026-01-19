@@ -25,18 +25,14 @@ class NormalizeTransform(torch.nn.Module):
 
 class GaussianNoise(torch.nn.Module):
     """Adds Gaussian noise to the tensor to simulate sonar speckle/electronic noise."""
-    def __init__(self, mean=0.0, sigma=0.1, p=0.5):
+    def __init__(self, mean=0.0, sigma=0.1):
         super().__init__()
         self.mean = mean
         self.sigma = sigma
-        self.p = p
 
     def forward(self, img):
-        if torch.rand(1).item() < self.p:
-            noise = torch.randn_like(img) * self.sigma + self.mean
-            return img + noise
-
-        return img
+        noise = torch.randn_like(img) * self.sigma + self.mean
+        return img + noise
 
 
 class MaskingGenerator:
@@ -160,47 +156,51 @@ class SonarDataTransform:
         self.local_crops_number = local_crops_number
 
         # We use RandomResizedCrop to force the model to match features across scales.
-        self.geo_global = v2.Compose([
-            v2.RandomResizedCrop(global_crops_size, scale=global_crops_scale, antialias=True),
-            v2.RandomHorizontalFlip(p=0.5),
-            v2.RandomVerticalFlip(p=0.5), 
-        ])
-
-        self.geo_local = v2.Compose([
-            v2.RandomResizedCrop(local_crops_size, scale=local_crops_scale, antialias=True),
-            v2.RandomHorizontalFlip(p=0.5),
-            v2.RandomVerticalFlip(p=0.5),
-        ])
+        self.geo_global = v2.RandomResizedCrop(global_crops_size, scale=global_crops_scale, antialias=True)
+        self.geo_local = v2.RandomResizedCrop(local_crops_size, scale=local_crops_scale, antialias=True)
 
         # Brightness corresponds to sonar gain (intensity)
         # Contrast corresponds to dynamic range of reciever
-        self.intensity_trans = v2.Compose([
-            # v2.RandomApply([
-            #     v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0, hue=0)
-            # ], p=0.8),
-            # v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.2),
-            # GaussianNoise(sigma=0.05, p=0.5),  # Gaussian Noise to simulate speckle noise
+        self.augmentations = v2.Compose([
+            v2.RandomHorizontalFlip(p=0.5),
+            v2.RandomVerticalFlip(p=0.5),
+            v2.RandomApply([
+                v2.ColorJitter(brightness=0.05, contrast=0.05, saturation=0, hue=0)
+            ], p=0.3),
+            v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 0.5))], p=0.2),
+            # v2.RandomApply(GaussianNoise(sigma=0.05), p=0.5),  # Gaussian Noise to simulate speckle noise
             NormalizeTransform(),
         ])
 
     def __call__(self, image):
-        crops = []
+        teacher_crops = []
+        student_crops = []
 
         # --- Global Crops (2 views) ---
         # Used by both Teacher and Student
         for _ in range(2):
             geo_aug = self.geo_global(image)
-            full_aug = self.intensity_trans(geo_aug)
-            crops.append(full_aug)
+            teacher_crops.append(geo_aug.clone())
+
+            full_aug = self.augmentations(geo_aug)
+            student_crops.append(full_aug)
 
         # --- Local Crops (8 views) ---
         # Used by Student only to encourage local-to-global correspondence
         for _ in range(self.local_crops_number):
             geo_aug = self.geo_local(image)
-            full_aug = self.intensity_trans(geo_aug)
-            crops.append(full_aug)
+            teacher_crops.append(geo_aug.clone())
+
+            full_aug = self.augmentations(geo_aug)
+            student_crops.append(full_aug)
 
         return {
-            'global_crops': crops[:2],
-            'local_crops': crops[2:]
+            'teacher': {
+                'global_crops': teacher_crops[:2],
+                'local_crops': teacher_crops[2:]
+            },
+            'student': {
+                'global_crops': student_crops[:2],
+                'local_crops': student_crops[2:]
+            },
         }
