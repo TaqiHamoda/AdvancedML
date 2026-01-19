@@ -160,20 +160,26 @@ class SonarDataTransform:
         self.local_crops_number = local_crops_number
 
         # We use RandomResizedCrop to force the model to match features across scales.
-        self.geo_global = v2.RandomResizedCrop(global_crops_size, scale=global_crops_scale, antialias=True)
-        self.geo_local = v2.RandomResizedCrop(local_crops_size, scale=local_crops_scale, antialias=True)
+        self.geo_global = v2.Compose([
+            v2.RandomHorizontalFlip(p=0.5),  # No vertical flips since it is impossible for shadows to face sensor
+            v2.RandomResizedCrop(global_crops_size, scale=global_crops_scale, antialias=True)
+        ])
+        self.geo_local = v2.Compose([
+            v2.RandomHorizontalFlip(p=0.5),  # No vertical flips since it is impossible for shadows to face sensor
+            v2.RandomResizedCrop(local_crops_size, scale=local_crops_scale, antialias=True)
+        ])
 
         # Brightness corresponds to sonar gain (intensity)
         # Contrast corresponds to dynamic range of reciever
         self.augmentations = v2.Compose([
-            v2.RandomHorizontalFlip(p=0.5),  # No vertical flips since it is impossible for shadows to face sensor
             v2.RandomApply([
                 v2.ColorJitter(brightness=0.4, contrast=0.4, saturation=0, hue=0)
             ], p=0.3),
             v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 1.5))], p=0.2),
             GaussianNoise(sigma=0.05, p=0.3),  # Gaussian Noise to simulate speckle noise
-            NormalizeTransform(),
         ])
+
+        self.normalize = NormalizeTransform()
 
     def __call__(self, image):
         teacher_crops = []
@@ -183,19 +189,19 @@ class SonarDataTransform:
         # Used by both Teacher and Student
         for _ in range(2):
             geo_aug = self.geo_global(image)
-            teacher_crops.append(geo_aug.clone())
+            teacher_crops.append(self.normalize(geo_aug.clone()))
 
             full_aug = self.augmentations(geo_aug)
-            student_crops.append(full_aug)
+            student_crops.append(self.normalize(full_aug))
 
         # --- Local Crops (8 views) ---
         # Used by Student only to encourage local-to-global correspondence
         for _ in range(self.local_crops_number):
             geo_aug = self.geo_local(image)
-            teacher_crops.append(geo_aug.clone())
+            teacher_crops.append(self.normalize(geo_aug.clone()))
 
             full_aug = self.augmentations(geo_aug)
-            student_crops.append(full_aug)
+            student_crops.append(self.normalize(full_aug))
 
         return {
             'teacher': {
