@@ -109,13 +109,13 @@ class ConvNeXtTiny(nn.Module):
 
         # Norms for Fusion input features (Standardizing before concat)
         self.norm_stages = nn.ModuleList()
-        for i in range(2, 4):
+        for i in range(1, 4):
             self.norm_stages.append(
                 LayerNorm(dims[i], eps=1e-6, data_format="channels_first")
             )
 
-        # Projection: (384 + 768 = 1152) -> 768.
-        self.fusion_proj = nn.Linear(dims[2] + dims[3], dims[-1])
+        # Projection: (192 + 384 + 768 = 1344) -> 768.
+        self.fusion_proj = nn.Linear(dims[1] + dims[2] + dims[3], dims[-1])
 
         self.norm = nn.LayerNorm(dims[-1], eps=1e-6) 
         self.apply(self._init_weights)
@@ -133,10 +133,10 @@ class ConvNeXtTiny(nn.Module):
             x = self.downsample_layers[i](x)
             x = self.stages[i](x)
 
-            if i < 2:
+            if i < 1:
                 continue
 
-            x_i = self.norm_stages[i - 2](x)
+            x_i = self.norm_stages[i - 1](x)
             if hypercolumn is None:
                 hypercolumn = x_i
             else:
@@ -151,7 +151,7 @@ class ConvNeXtTiny(nn.Module):
 
         # --- Patch Fusion Branch ---
         # Project & Final Normalize
-        x_patch = hypercolumn.flatten(2).transpose(1, 2)   # (N, 196, 1152)
+        x_patch = hypercolumn.flatten(2).transpose(1, 2)   # (N, 196, 1344)
         x_patch = self.fusion_proj(x_patch)                # (N, 196, 768)
         x_patch = self.norm(x_patch)                # Normalized (N, 196, 768)
 

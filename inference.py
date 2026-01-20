@@ -4,7 +4,6 @@ import torch
 import numpy as np
 import cv2
 from sklearn.decomposition import PCA
-import torch.nn.functional as F
 
 # Import your modules
 from dino import ConvNeXtTiny
@@ -49,7 +48,8 @@ def load_backbone(weights_path, device):
     model.eval()
     return model
 
-def main():
+
+if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -60,7 +60,7 @@ def main():
         dataset = SonarDataset()
     except ValueError as e:
         print(f"Error: {e}")
-        return
+        exit()
 
     total_files = len(dataset)
     if total_files < N_TILES:
@@ -73,83 +73,47 @@ def main():
 
     print(f"Running inference on {len(indices)} tiles...")
 
-    all_features = []
-    metadata = [] # Store original images and shapes for reconstruction
+    data = []
     with torch.no_grad():
         for idx in indices:
             raw_tensor = dataset[idx]
             input_tensor = transform(raw_tensor).unsqueeze(0).to(device)
 
-            # Forward pass returns list of 3 tensors
-            feats_list = model.get_features_stages(input_tensor)
-            
-            # feats_list[0] is the largest (Target Resolution: H/8, W/8)
-            target_h, target_w = feats_list[0].shape[-2:]
-
-            resized_feats = []
-
-            # Process Stage 1 (already target size)
-            f1 = feats_list[0] # (1, 192, H8, W8)
-            resized_feats.append(FEATURE_WEIGHTS[0] * f1)
-
-            # Process Stage 2 (Upsample 2x)
-            f2 = FEATURE_WEIGHTS[1] * F.interpolate(feats_list[1], size=(target_h, target_w), mode='bilinear', align_corners=False)
-            resized_feats.append(f2)
-
-            # Process Stage 3 (Upsample 4x)
-            f3 = FEATURE_WEIGHTS[2] * F.interpolate(feats_list[2], size=(target_h, target_w), mode='bilinear', align_corners=False)
-            resized_feats.append(f3)
-
-            # Concatenate along channel dimension
-            # 192 + 384 + 768 = 1344 dimensions
-            hypercolumn = torch.cat(resized_feats, dim=1) # (1, 1344, H8, W8)
-
-            # Flatten to (N_pixels, 1344)
-            features_flat = F.normalize(hypercolumn.permute(0, 2, 3, 1).flatten(0, 2), dim=1).cpu().numpy()
-
-            all_features.append(features_flat)
-            metadata.append({
-                'idx': idx,
-                'original_tensor': raw_tensor,
-                'feat_h': target_h,
-                'feat_w': target_w
-            })
+            # Forward pass returns class embedding and patch embeddings
+            cls, patch = model(input_tensor)
+            data.append((
+                raw_tensor.squeeze().cpu().numpy(),
+                cls.squeeze().cpu().numpy(),
+                patch.squeeze().cpu().numpy()
+            ))
 
     # Concatenate all features from all images to learn a common color mapping
     print("Fitting PCA...")
-    stacked_features = np.concatenate(all_features, axis=0) # (Total_Patches, Dim)
+    stacked_patches = np.concatenate([d[2] for d in data], axis=0) # (total patches, Dim)
 
     pca = PCA(n_components=3, whiten=True)
-    pca.fit(stacked_features) # (Total_Patches, 3)
+    pca.fit(stacked_patches)
 
     print("Saving visualizations...")
 
-    for i, meta in enumerate(metadata):
+    patch_dim = int(np.sqrt(data[0][2].shape[0]))
+    for i, (img, cls, patch) in enumerate(data):
         # Transform ALL pixels of this image
-        feats = all_features[i]
-        pca_feats = pca.transform(feats) # (H8*W8, 3)
+        pca_patch = pca.transform(patch) # (H8*W8, 3)
 
         # Sigmoid & Scaling
-        pca_feats = 1.0 / (1.0 + np.exp(-2 * pca_feats))
-        pca_feats = (255 * pca_feats).astype(np.uint8)
-
-        # Reshape to grid
-        h, w = meta['feat_h'], meta['feat_w']
-        pca_grid = pca_feats.reshape(h, w, 3)
+        pca_patch = 1.0 / (1.0 + np.exp(-2 * pca_patch))
+        pca_patch = (255 * pca_patch).astype(np.uint8)
+        pca_patch = pca_patch.reshape(patch_dim, patch_dim, 3)
 
         # Resize to original image size
-        orig_h, orig_w = meta['original_tensor'].shape[1], meta['original_tensor'].shape[2]
-        pca_vis = cv2.resize(pca_grid, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST_EXACT)
+        pca_vis = cv2.resize(pca_patch, img.shape, interpolation=cv2.INTER_NEAREST_EXACT)
 
         # Save Input
-        raw_img = meta['original_tensor'].squeeze().numpy()
-        raw_img = np.clip(raw_img, 0, 1)
+        raw_img = np.clip(img, 0, 1)
         gray_vis = (255 * raw_img).astype(np.uint8)
 
         cv2.imwrite(os.path.join(RESULTS_DIR, f"{i}_org.png"), gray_vis)
         cv2.imwrite(os.path.join(RESULTS_DIR, f"{i}_pca.png"), pca_vis)
 
     print(f"Done. Results saved to {RESULTS_DIR}")
-
-if __name__ == "__main__":
-    main()

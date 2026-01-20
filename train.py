@@ -75,11 +75,11 @@ class Trainer:
             logger.info(f"Training on {self.device} (World Size: {self.world_size})")
 
         self.output_dim = 4096  # Original 65536 vector is too large for our batch size
-        self.stride_size = 16
+        self.stride_size = 8
 
         # --- Hyperparameters ---
-        self.batch_size = 64  # Max possible per GPU
-        self.effective_batch_size = 4096 // self.world_size  # Desired batch size
+        self.batch_size = 50  # Max possible per GPU
+        self.effective_batch_size = self.output_dim  # Desired batch size (2 * output_dim / [world_size = 2] = output_dim)
         self.accum_iter = self.effective_batch_size // self.batch_size  # Number of gradient accumulation steps
         self.base_lr = 0.0005 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
         self.min_lr = 1e-6
@@ -308,7 +308,7 @@ class Trainer:
 
             # Log only on Master
             if self.rank == 0 and i % self.accum_iter == 0:
-                logger.info(f"Epoch {epoch_index:04d} [{i:04d}/{len(self.loader)}] "
+                logger.info(f"Epoch {epoch_index:03d} [{i:04d}/{len(self.loader)}] "
                     f"lr: {current_lr:.6f}, temp: {self.teacher_temp_schedule[it]:.4f}, "
                     f"m: {self.momentum_schedule[it]:.4f}, wd: {self.wd_schedule[it]:.4f}, "
                     f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")

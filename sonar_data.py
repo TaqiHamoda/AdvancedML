@@ -152,7 +152,7 @@ class SonarDataTransform:
     def __init__(
         self,
         global_crops_scale=(0.4, 1.0),
-        local_crops_scale=(0.15, 0.4),
+        local_crops_scale=(0.3, 0.4),
         local_crops_number=8,
         global_crops_size=224,
         local_crops_size=96,
