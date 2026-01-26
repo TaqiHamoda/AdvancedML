@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from dino import ConvNeXtTiny
 from sonar_data import NormalizeTransform, SonarDataset
 
-LOG_FILE = "logs/1768914485.2876122.log"
+LOG_FILE = "logs/1769267466.450234.log"
 
 FIGURES_DIR = "figures/"
 RESULTS_DIR = "results/"
@@ -19,7 +19,6 @@ WEIGHTS_DIR = "weights/"
 WEIGHT_FILE = "checkpoint_latest.pth"
 
 N_TILES = 100
-FEATURE_WEIGHTS = (0.1, 0.1, 1)
 
 
 def save_figure(graphs, labels, name, threshold=None):
@@ -199,13 +198,13 @@ if __name__ == "__main__":
         gray_vis = (255 * np.clip(img, 0, 1)).astype(np.uint8)
         gray_vis = cv2.cvtColor(gray_vis, cv2.COLOR_GRAY2BGR)
 
-        # Transform ALL pixels of this image
+        # Transform ALL features of this image to pixel space
         pca_patch = upsampled_patch.reshape(-1, upsampled_patch.shape[-1])
         pca_patch = pca.transform(pca_patch) # (H*W, 3)
         pca_patch = pca_patch.reshape(patch_dim, patch_dim, 3)
 
-        # Sigmoid & Scaling
-        pca_patch = 0.6 * pca_patch + 0.4 * img.reshape((patch_dim, patch_dim, 1))
+        # Sigmoid & Scaling for more vibrant colors
+        pca_patch = 0.7 * pca_patch + 0.3 * img.reshape((patch_dim, patch_dim, 1))
         pca_patch = 1.0 / (1.0 + np.exp(-2 * pca_patch))
         pca_patch = (255 * pca_patch).astype(np.uint8)
 

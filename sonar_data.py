@@ -25,7 +25,7 @@ class NormalizeTransform(torch.nn.Module):
 
 class GaussianNoise(torch.nn.Module):
     """Adds Gaussian noise to the tensor to simulate sonar speckle/electronic noise."""
-    def __init__(self, mean=0.0, sigma=0.1, p=0.5):
+    def __init__(self, mean=0.0, sigma=(0.01, 0.05), p=0.5):
         super().__init__()
         self.mean = mean
         self.sigma = sigma
@@ -35,7 +35,9 @@ class GaussianNoise(torch.nn.Module):
         if torch.rand(1) >= self.p:
             return img
 
-        noise = torch.randn_like(img) * self.sigma + self.mean
+        sigma = random.random() * (self.sigma[1] - self.sigma[0]) + self.sigma[0]
+        noise = torch.randn_like(img) * sigma + self.mean
+
         return img + noise
 
 
@@ -151,8 +153,6 @@ class SonarDataTransform:
     """
     def __init__(
         self,
-        global_crops_scale=(0.4, 1.0),
-        local_crops_scale=(0.3, 0.4),
         local_crops_number=8,
         global_crops_size=224,
         local_crops_size=96,
@@ -160,23 +160,20 @@ class SonarDataTransform:
         self.local_crops_number = local_crops_number
 
         # We use RandomResizedCrop to force the model to match features across scales.
-        self.geo_global = v2.Compose([
-            v2.RandomHorizontalFlip(p=0.5),  # No vertical flips since it is impossible for shadows to face sensor
-            v2.RandomResizedCrop(global_crops_size, scale=global_crops_scale, antialias=True)
-        ])
-        self.geo_local = v2.Compose([
-            v2.RandomHorizontalFlip(p=0.5),  # No vertical flips since it is impossible for shadows to face sensor
-            v2.RandomResizedCrop(local_crops_size, scale=local_crops_scale, antialias=True)
-        ])
+        self.global_crop = v2.RandomCrop(global_crops_size)
+        self.local_crop = v2.RandomCrop(local_crops_size)
 
-        # Brightness corresponds to sonar gain (intensity)
-        # Contrast corresponds to dynamic range of reciever
+        # Note: Blur shouldn't be used with sonar imagery since it breaks the physics of acoustics.
+        # If you want to make the image or objects unclear, increase the noise instead to remain
+        # accurate to the physics. (Interference is a more accurate way to model "blur" or loss of clarity)
         self.augmentations = v2.Compose([
-            v2.RandomApply([
-                v2.ColorJitter(brightness=0.4, contrast=0.4, saturation=0, hue=0)
-            ], p=0.3),
-            v2.RandomApply([v2.GaussianBlur(kernel_size=5, sigma=(0.1, 1.5))], p=0.2),
-            GaussianNoise(sigma=0.05, p=0.3),  # Gaussian Noise to simulate speckle noise
+            v2.RandomHorizontalFlip(p=0.5),  # No vertical flips since it is impossible for shadows to face sensor
+            v2.RandomApply([v2.ColorJitter(
+                brightness=(0.05, 0.2),  # Brightness corresponds to sonar gain (intensity)
+                contrast=(0.05, 0.2),    # Contrast corresponds to dynamic range of reciever
+                saturation=0, hue=0      # Data is only 1 channel and the concept of colors doesn't apply to sonar
+            )], p=0.8),
+            GaussianNoise(sigma=(0.005, 0.05), p=0.5),  # Gaussian Noise to simulate speckle noise
         ])
 
         self.normalize = NormalizeTransform()
@@ -188,19 +185,19 @@ class SonarDataTransform:
         # --- Global Crops (2 views) ---
         # Used by both Teacher and Student
         for _ in range(2):
-            geo_aug = self.geo_global(image)
-            teacher_crops.append(self.normalize(geo_aug.clone()))
+            crop_aug = self.global_crop(image)
+            teacher_crops.append(self.normalize(crop_aug.clone()))
 
-            full_aug = self.augmentations(geo_aug)
+            full_aug = self.augmentations(crop_aug)
             student_crops.append(self.normalize(full_aug))
 
         # --- Local Crops (8 views) ---
         # Used by Student only to encourage local-to-global correspondence
         for _ in range(self.local_crops_number):
-            geo_aug = self.geo_local(image)
-            teacher_crops.append(self.normalize(geo_aug.clone()))
+            crop_aug = self.local_crop(image)
+            teacher_crops.append(self.normalize(crop_aug.clone()))
 
-            full_aug = self.augmentations(geo_aug)
+            full_aug = self.augmentations(crop_aug)
             student_crops.append(self.normalize(full_aug))
 
         return {

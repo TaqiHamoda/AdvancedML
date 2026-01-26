@@ -79,9 +79,9 @@ class Trainer:
 
         # --- Hyperparameters ---
         self.batch_size = 50  # Max possible per GPU
-        self.effective_batch_size = self.output_dim  # Desired batch size (2 * output_dim / [world_size = 2] = output_dim)
+        self.effective_batch_size = self.output_dim  # Desired batch size
         self.accum_iter = self.effective_batch_size // self.batch_size  # Number of gradient accumulation steps
-        self.base_lr = 0.0005 * self.batch_size * self.world_size / 256  # LINEAR SCALING RULE: Scale LR by world size and batch size
+        self.base_lr = 0.0010
         self.min_lr = 1e-6
         self.weight_decay = 0.04
         self.epochs = 100
@@ -96,8 +96,8 @@ class Trainer:
 
         self.w_dino = 1.0
         self.w_ibot = 1.0
-        self.w_gram = 1.0
-        self.w_koleo = 0.0001
+        self.w_gram = 0.5
+        self.w_koleo = 0.1
 
         # --- Masking, Data & Sampler ---
         self.mask_generator = MaskingGenerator(input_size=(224, 224), stride_size=self.stride_size, mask_ratio=0.5)
@@ -329,6 +329,7 @@ class Trainer:
             if (i + 1) % self.accum_iter == 0:
                 self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(self.student_ibot_head.parameters(), max_norm=1.0)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)

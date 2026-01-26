@@ -62,7 +62,7 @@ class Centering(nn.Module):
     DINOv1-style Loss: Centering + Softmax. 
     More stable for small batch sizes (B < K).
     """
-    def __init__(self, out_dim, student_temp=0.1, center_momentum=0.9):
+    def __init__(self, out_dim, student_temp=0.1, center_momentum=0.996):
         super().__init__()
         self.student_temp = student_temp
         self.center_momentum = center_momentum
@@ -161,7 +161,7 @@ class GramLoss(nn.Module):
         super().__init__()
         self.mse = nn.MSELoss()
 
-    def forward(self, student_patches, teacher_patches):        
+    def forward(self, student_patches, teacher_patches):
         student_patches = F.normalize(student_patches, dim=-1)
         teacher_patches = F.normalize(teacher_patches, dim=-1)
 
