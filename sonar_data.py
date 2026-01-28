@@ -169,11 +169,11 @@ class SonarDataTransform:
         self.augmentations = v2.Compose([
             v2.RandomHorizontalFlip(p=0.5),  # No vertical flips since it is impossible for shadows to face sensor
             v2.RandomApply([v2.ColorJitter(
-                brightness=(0.05, 0.2),  # Brightness corresponds to sonar gain (intensity)
-                contrast=(0.05, 0.2),    # Contrast corresponds to dynamic range of reciever
+                brightness=(0.05, 0.5),  # Brightness corresponds to sonar gain (intensity)
+                contrast=(0.05, 0.5),    # Contrast corresponds to dynamic range of reciever
                 saturation=0, hue=0      # Data is only 1 channel and the concept of colors doesn't apply to sonar
             )], p=0.8),
-            GaussianNoise(sigma=(0.005, 0.05), p=0.5),  # Gaussian Noise to simulate speckle noise
+            GaussianNoise(sigma=(0.005, 0.15), p=0.5),  # Gaussian Noise to simulate speckle noise
         ])
 
         self.normalize = NormalizeTransform()
