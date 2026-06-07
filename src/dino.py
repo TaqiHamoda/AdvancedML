@@ -225,6 +225,10 @@ class ConvNeXtTiny(nn.Module):
             if i < 1: continue
 
             x_i = self.norm_stages[i - 1](x)
+            if mask is not None:  # Clean up bias leakage before Hypercolumn
+                mask_i = F.interpolate(mask.unsqueeze(1).float(), size=x_i.shape[-2:], mode='nearest')
+                x_i = x_i * mask_i
+
             if hypercolumn is None:
                 hypercolumn = x_i
             else:
@@ -233,6 +237,10 @@ class ConvNeXtTiny(nn.Module):
 
         # Global CLS Branch
         if mask is not None:
+            # Clean up bias leakage before Global Pooling
+            mask_x = F.interpolate(mask.unsqueeze(1).float(), size=x.shape[-2:], mode='nearest')
+            x = x * mask_x
+
             # current_mask is True for active tokens. We count them to get the denominator.
             active_count = current_mask.sum(dim=(-1, -2), keepdim=True) + 1e-6
             # Sum over spatial dims and divide by valid tokens

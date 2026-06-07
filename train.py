@@ -175,6 +175,7 @@ class Trainer:
         self.student = MultiCropWrapper(student_backbone, student_head).to(self.device)
         self.teacher = MultiCropWrapper(teacher_backbone, teacher_head).to(self.device)
 
+        self.teacher.eval()  # Teacher is not trained with gradients
         for p in self.teacher.parameters():
             p.requires_grad = False
         self.teacher.load_state_dict(self.student.state_dict())
@@ -186,6 +187,7 @@ class Trainer:
 
         self.student_ibot_head = student_ibot_head.to(self.device)
         self.teacher_ibot_head = teacher_ibot_head.to(self.device)
+        self.teacher_ibot_head.eval()
         teacher_ibot_head.load_state_dict(student_ibot_head.state_dict())
         for p in self.teacher_ibot_head.parameters(): p.requires_grad = False
 
@@ -266,13 +268,15 @@ class Trainer:
             all_student_crops = student_global_crops + student_local_crops
             all_student_masks = active_masks_chunked + [None] * len(student_local_crops)  # Local crops don't get masked
 
+            masks_flat = masks.view(masks.shape[0], -1).bool()
+
             with torch.amp.autocast('cuda'):
                 with torch.no_grad():
                     # Teacher gets no masks
                     teacher_output, teacher_patches_list, _ = self.teacher(teacher_global_crops, masks=None)
                     
                     t_patches = torch.cat(teacher_patches_list, dim=0)  # (2*B, N, D)
-                    t_patches_masked = t_patches[masks.bool()]  # (Total_Masked_Tokens, D)
+                    t_patches_masked = t_patches[masks_flat]  # (Total_Masked_Tokens, D)
                     t_ibot_out = self.teacher_ibot_head(t_patches_masked)  # (Total_Masked_Tokens, K)
 
                 # Student gets the crops AND the masks
@@ -284,7 +288,7 @@ class Trainer:
                 # iBOT Loss (Patch tokens)
                 # Select only the global crop patches from student output (first 2 items)
                 s_global_patches = student_patches_list[0]  # (2*B, N, D)
-                s_patches_masked = s_global_patches[masks.bool()]  # (Total_Masked_Tokens, D)
+                s_patches_masked = s_global_patches[masks_flat]  # (Total_Masked_Tokens, D)
                 s_ibot_out = self.student_ibot_head(s_patches_masked)  # (Total_Masked_Tokens, K)
                 loss_ibot = self.ibot_loss_fn(
                     s_ibot_out,
@@ -321,7 +325,7 @@ class Trainer:
             del student_cls
             del all_student_crops, all_student_masks
 
-            if (i + 1) % self.accum_iter == 0:
+            if ((i + 1) % self.accum_iter == 0) or ((i + 1) == len(self.loader)):
                 self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=1.0)
                 torch.nn.utils.clip_grad_norm_(self.student_ibot_head.parameters(), max_norm=1.0)
