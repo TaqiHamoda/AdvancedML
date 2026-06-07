@@ -309,10 +309,8 @@ class Trainer:
                         current_teacher_temp
                     )
 
-                    n_global = len(student_global_crops)
                     student_cls_chunked = student_cls.chunk(len(all_student_crops))
-                    student_global_cls = torch.cat(student_cls_chunked[:n_global])
-                    loss_koleo = self.koleo_loss_fn(student_global_cls)
+                    loss_koleo = self.koleo_loss_fn(student_cls_chunked[0])  # Pass ONLY the first global crop (unique independent images)
 
                     loss_gram = self.gram_loss_fn(student_patches_list[0], teacher_patches_list[0])
                     loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)

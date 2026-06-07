@@ -81,7 +81,8 @@ class Centering(nn.Module):
             dist.all_reduce(batch_center)
             batch_center = batch_center / dist.get_world_size()
 
-        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
+        # Update in-place using copy_ (The assignment operator removes the registered buffer reference)
+        self.center.copy_(self.center * self.center_momentum + batch_center * (1 - self.center_momentum))
 
     def get_probs(self, student_output, teacher_output, teacher_temp):
         self.update_center(teacher_output)
@@ -221,4 +222,4 @@ class KoLeoLoss(nn.Module):
         nearest_neighbors = all_x[indices]
         distances = self.pdist(x, nearest_neighbors)
 
-        return -torch.log(distances + self.eps).mean()
+        return -torch.log(distances).mean()
