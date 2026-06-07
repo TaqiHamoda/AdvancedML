@@ -13,7 +13,7 @@ import os, time
 
 # Import your modules
 from src.dataset import MaskingGenerator, SonarDataset, SonarDataTransform
-from src.dino import ConvNeXtTiny, DINOHead, MultiCropWrapper
+from src.dino import ConvNeXtV2, DINOHead, MultiCropWrapper
 from src.losses import DINOLoss, iBOTPatchLoss, GramLoss, KoLeoLoss
 
 logger = logging.getLogger(__name__)
@@ -165,8 +165,8 @@ class Trainer:
         self.scaler = torch.amp.GradScaler('cuda')
 
         # --- Models ---
-        student_backbone = ConvNeXtTiny(in_chans=1)
-        teacher_backbone = ConvNeXtTiny(in_chans=1)
+        student_backbone = ConvNeXtV2(in_chans=1)
+        teacher_backbone = ConvNeXtV2(in_chans=1)
         embed_dim = student_backbone.embed_dim
 
         student_head = DINOHead(embed_dim, out_dim=self.output_dim)

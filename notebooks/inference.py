@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
 # Import your modules
-from src.dino import ConvNeXtTiny
+from src.dino import ConvNeXtV2
 from src.dataset import NormalizeTransform, SonarDataset
 
 LOG_FILE = "logs/1769267466.450234.log"
@@ -75,7 +75,7 @@ def load_backbone(weights_path, device):
     if not backbone_state_dict:
         raise ValueError("No 'backbone.' keys found in the checkpoint. Check the weight file structure.")
 
-    model = ConvNeXtTiny(in_chans=1)
+    model = ConvNeXtV2(in_chans=1)
     model.load_state_dict(backbone_state_dict)
     model.to(device)
     model.eval()

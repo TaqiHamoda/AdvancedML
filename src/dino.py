@@ -13,22 +13,6 @@ def dense_to_sparse(x, mask):
     return spconv.SparseConvTensor(features, indices, [H, W], B)
 
 
-class DropPath(nn.Module):
-    def __init__(self, drop_prob=0.0):
-        super().__init__()
-        self.drop_prob = drop_prob
-
-    def forward(self, x):
-        if self.drop_prob == 0.0 or not self.training:
-            return x
-
-        keep_prob = 1 - self.drop_prob
-        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
-        random_tensor.floor_()
-        return x.div(keep_prob) * random_tensor
-
-
 class LayerNorm(nn.Module):
     def __init__(self, normalized_shape, eps=1e-6, data_format="channels_last"):
         super().__init__()
@@ -49,64 +33,124 @@ class LayerNorm(nn.Module):
             return x
 
 
+class SparseGRN(nn.Module):
+    """Global Response Normalization computed natively on sparse spconv features."""
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.zeros(dim))
+        self.beta = nn.Parameter(torch.zeros(dim))
+        self.eps = eps
+
+    def forward(self, features, indices, batch_size):
+        # features shape: (N_active, C)
+        # indices shape: (N_active, 3) -> indices[:, 0] contains the batch index
+        batch_idx = indices[:, 0].long()
+        x2 = features.pow(2)
+        sum_x2 = torch.zeros(batch_size, features.size(1), device=features.device, dtype=features.dtype)
+        sum_x2.index_add_(dim=0, index=batch_idx, source=x2)
+        Gx = torch.sqrt(sum_x2 + self.eps) # (B, C)
+        Nx = Gx / (Gx.mean(dim=1, keepdim=True) + self.eps) # (B, C)
+        Nx_expanded = Nx[batch_idx] # (N_active, C)
+        return self.gamma * (features * Nx_expanded) + self.beta + features
+
+
 class GRN(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.gamma = nn.Parameter(torch.zeros(1, 1, 1, dim))
         self.beta = nn.Parameter(torch.zeros(1, 1, 1, dim))
 
-    def forward(self, x, mask=None):
-        if mask is not None:  # Prevent biases from leaking into padded areas
-            mask_hwc = mask.unsqueeze(-1)
-            x = x * mask_hwc
-
+    def forward(self, x):
         Gx = torch.norm(x, p=2, dim=(1,2), keepdim=True)
-        if mask is not None:  # Average only over the active sites if mask is provided
-            active_count = mask.sum(dim=(1,2), keepdim=True).unsqueeze(-1) + 1e-6
-            Nx = Gx / (Gx.sum(dim=-1, keepdim=True) / active_count + 1e-6)
-        else:
-            Nx = Gx / (Gx.mean(dim=-1, keepdim=True) + 1e-6)
-
+        Nx = Gx / (Gx.mean(dim=-1, keepdim=True) + 1e-6)
         out = self.gamma * (x * Nx) + self.beta + x
-        if mask is not None:  # Clean up bias leakage again
-            out = out * mask_hwc
-
         return out
 
 
-class Block(nn.Module):
-    """Sparse block for the Encoder."""
+class SparseDropPath(nn.Module):
+    """DropPath adapted for sparse tensors. Drops entire samples in a batch, not individual tokens."""
+    def __init__(self, drop_prob=0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, features, indices, batch_size):
+        if self.drop_prob == 0.0 or not self.training:
+            return features
+
+        keep_prob = 1 - self.drop_prob
+        batch_idx = indices[:, 0].long()
+
+        # Generate the random drop mask per batch element: shape (B, 1)
+        random_tensor = keep_prob + torch.rand(batch_size, 1, dtype=features.dtype, device=features.device)
+        random_tensor.floor_()  # 1 with keep_prob, 0 with drop_prob
+        random_tensor.div_(keep_prob)
+
+        drop_mask = random_tensor[batch_idx]
+        return features * drop_mask
+
+
+class DropPath(nn.Module):
+    def __init__(self, drop_prob=0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x):
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+
+        keep_prob = 1 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor.floor_()
+        return x.div(keep_prob) * random_tensor
+
+
+class SparseBlock(nn.Module):
+    """Fully Sparse block for the Encoder."""
     def __init__(self, dim, drop_path=0.0, layer_scale_init_value=1e-6):
         super().__init__()
+        # 1. Sparse Depthwise Convolution
         self.dwconv = spconv.SubMConv2d(
             in_channels=dim, out_channels=dim, kernel_size=7, padding=3, 
             groups=dim, bias=True, algo=spconv.ConvAlgo.Native
         )
-        self.norm = LayerNorm(dim, eps=1e-6)
+
+        self.norm = nn.LayerNorm(dim, eps=1e-6) 
         self.pwconv1 = nn.Linear(dim, 4 * dim)
         self.act = nn.GELU()
-        self.grn = GRN(4 * dim)
+        self.grn = SparseGRN(4 * dim)
         self.pwconv2 = nn.Linear(4 * dim, dim)
-        self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim)), requires_grad=True) if layer_scale_init_value > 0 else None
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
-    def forward(self, x: spconv.SparseConvTensor, mask: torch.Tensor):
-        shortcut = x.dense()
+        if layer_scale_init_value > 0:
+            self.gamma = nn.Parameter(layer_scale_init_value * torch.ones(dim), requires_grad=True)
+        else:
+            self.gamma = nn.Parameter(torch.ones(dim), requires_grad=True)
+
+        if drop_path > 0.:
+            self.drop_path = SparseDropPath(drop_path)
+        else:
+            self.drop_path = lambda features, indices, batch_size: features  # Identity for sparse tensors
+
+    def forward(self, x: spconv.SparseConvTensor):
+        shortcut_features = x.features
+        batch_size = x.batch_size
+
         x_sp = self.dwconv(x)
-        x_dense = x_sp.dense().permute(0, 2, 3, 1)
-        x_dense = self.norm(x_dense)
-        x_dense = self.pwconv1(x_dense)
-        x_dense = self.act(x_dense)
-        x_dense = self.grn(x_dense, mask) 
-        x_dense = self.pwconv2(x_dense)
-        if self.gamma is not None:
-            x_dense = self.gamma * x_dense
-        x_dense = x_dense.permute(0, 3, 1, 2) * mask.unsqueeze(1)
-        out_dense = shortcut + self.drop_path(x_dense)
-        return dense_to_sparse(out_dense, mask)
+        features = x_sp.features
+        indices = x_sp.indices
+
+        features = self.norm(features)
+        features = self.pwconv1(features)
+        features = self.act(features)
+        features = self.grn(features, indices, batch_size)
+        features = self.pwconv2(features)
+        features = self.gamma * features
+        features = self.drop_path(features, indices, batch_size)
+
+        return x_sp.replace_feature(shortcut_features + features)
 
 
-class DenseBlock(nn.Module):
+class Block(nn.Module):
     """Dense block for the Decoder."""
     def __init__(self, dim, drop_path=0.0, layer_scale_init_value=1e-6):
         super().__init__()
@@ -116,8 +160,11 @@ class DenseBlock(nn.Module):
         self.act = nn.GELU()
         self.grn = GRN(4 * dim)
         self.pwconv2 = nn.Linear(4 * dim, dim)
-        self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim)), requires_grad=True) if layer_scale_init_value > 0 else None
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        if layer_scale_init_value > 0:
+            self.gamma = nn.Parameter(layer_scale_init_value * torch.ones(dim), requires_grad=True)
+        else:
+            self.gamma = nn.Parameter(torch.ones(dim), requires_grad=True)
 
     def forward(self, x):
         input = x
@@ -127,8 +174,7 @@ class DenseBlock(nn.Module):
         x = self.act(x)
         x = self.grn(x)
         x = self.pwconv2(x)
-        if self.gamma is not None:
-            x = self.gamma * x
+        x = self.gamma * x
         x = x.permute(0, 3, 1, 2)
         return input + self.drop_path(x)
 
@@ -140,7 +186,7 @@ class ConvNeXtV2Decoder(nn.Module):
         self.proj = nn.Conv2d(encoder_dim, decoder_dim, kernel_size=1)
         self.mask_token = nn.Parameter(torch.zeros(1, decoder_dim, 1, 1))
         nn.init.trunc_normal_(self.mask_token, std=.02)
-        self.block = DenseBlock(dim=decoder_dim)
+        self.block = Block(dim=decoder_dim)
         self.head_proj = nn.Linear(decoder_dim, encoder_dim) 
 
     def forward(self, x, active_mask):
@@ -155,9 +201,11 @@ class ConvNeXtV2Decoder(nn.Module):
         return self.head_proj(x.flatten(2).transpose(1, 2))
 
 
-class ConvNeXtTiny(nn.Module):
+class ConvNeXtV2(nn.Module):
     def __init__(self, in_chans=1, drop_path_rate=0.0, layer_scale_init_value=1e-6):
         super().__init__()
+
+        # Use Tiny ConvNeXtV2 configuration
         depths = [3, 3, 9, 3]
         dims = [96, 192, 384, 768]
 
@@ -177,7 +225,7 @@ class ConvNeXtTiny(nn.Module):
         cur = 0
         for i in range(4):
             stage_blocks = nn.ModuleList([
-                Block(dim=dims[i], drop_path=dp_rates[cur + j], layer_scale_init_value=layer_scale_init_value) 
+                SparseBlock(dim=dims[i], drop_path=dp_rates[cur + j], layer_scale_init_value=layer_scale_init_value) 
                 for j in range(depths[i])
             ])
             self.stages.append(stage_blocks)
@@ -219,7 +267,7 @@ class ConvNeXtTiny(nn.Module):
                 x_sparse = dense_to_sparse(x, current_mask)
 
             for block in self.stages[i]:
-                x_sparse = block(x_sparse, current_mask)
+                x_sparse = block(x_sparse)
 
             x = x_sparse.dense()
             if i < 1: continue
