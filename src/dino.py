@@ -46,7 +46,7 @@ class SparseGRN(nn.Module):
         # indices shape: (N_active, 3) -> indices[:, 0] contains the batch index
         batch_idx = indices[:, 0].long()
         x2 = features.pow(2)
-        sum_x2 = torch.zeros(batch_size, features.size(1), device=features.device, dtype=features.dtype)
+        sum_x2 = torch.zeros(batch_size, features.size(1), device=features.device, dtype=torch.float32)
         sum_x2.index_add_(dim=0, index=batch_idx, source=x2)
         Gx = torch.sqrt(sum_x2 + self.eps) # (B, C)
         Nx = Gx / (Gx.mean(dim=1, keepdim=True) + self.eps) # (B, C)
@@ -112,7 +112,7 @@ class SparseBlock(nn.Module):
         # 1. Sparse Depthwise Convolution
         self.dwconv = spconv.SubMConv2d(
             in_channels=dim, out_channels=dim, kernel_size=7, padding=3, 
-            groups=dim, bias=True, algo=spconv.ConvAlgo.Native
+            groups=1, bias=True, algo=spconv.ConvAlgo.Native
         )
 
         self.norm = nn.LayerNorm(dim, eps=1e-6) 

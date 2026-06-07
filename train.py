@@ -78,7 +78,7 @@ class Trainer:
         self.stride_size = 32
 
         # --- Hyperparameters ---
-        self.batch_size = 50  # Max possible per GPU
+        self.batch_size = 20  # Max possible per GPU
         self.effective_batch_size = 4096  # Desired batch size
         self.accum_iter = self.effective_batch_size // self.batch_size  # Number of gradient accumulation steps
         self.base_lr = 0.0010
@@ -101,7 +101,7 @@ class Trainer:
 
         # --- Masking, Data & Sampler ---
         self.mask_generator = MaskingGenerator(input_size=(288, 288), stride_size=self.stride_size, mask_ratio=0.5)
-        dataset = SonarDataset(data_dir="./dataset", ext="*.npy")
+        dataset = SonarDataset()
         transform = SonarDataTransform(local_crops_number=8)
         
         # Wrapper class to apply transform on the fly
@@ -332,7 +332,7 @@ class Trainer:
             del s_ibot_out, t_ibot_out
             del teacher_global_crops, teacher_local_crops, student_global_crops, student_local_crops, masks
             del student_patches_list, teacher_patches_list
-            del student_cls
+            del student_cls, masks_flat
             del all_student_crops, all_student_masks
 
             if ((i + 1) % self.accum_iter == 0) or ((i + 1) == len(self.loader)):
@@ -342,6 +342,7 @@ class Trainer:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)
+                torch.cuda.empty_cache()
 
                 with torch.no_grad():
                     m = self.momentum_schedule[it]
