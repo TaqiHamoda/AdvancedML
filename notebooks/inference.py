@@ -8,8 +8,8 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
 # Import your modules
-from dino import ConvNeXtTiny
-from dataloader import NormalizeTransform, SonarDataset
+from src.dino import ConvNeXtTiny
+from src.dataset import NormalizeTransform, SonarDataset
 
 LOG_FILE = "logs/1769267466.450234.log"
 

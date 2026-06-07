@@ -12,9 +12,9 @@ from tqdm import tqdm
 import os, time
 
 # Import your modules
-from dataloader import MaskingGenerator, SonarDataset, SonarDataTransform
-from dino import ConvNeXtTiny, DINOHead, MultiCropWrapper
-from losses import DINOLoss, iBOTPatchLoss, GramLoss, KoLeoLoss
+from src.dataset import MaskingGenerator, SonarDataset, SonarDataTransform
+from src.dino import ConvNeXtTiny, DINOHead, MultiCropWrapper
+from src.losses import DINOLoss, iBOTPatchLoss, GramLoss, KoLeoLoss
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ class Trainer:
         self.w_koleo = 0.1
 
         # --- Masking, Data & Sampler ---
-        self.mask_generator = MaskingGenerator(input_size=(224, 224), stride_size=self.stride_size, mask_ratio=0.5)
+        self.mask_generator = MaskingGenerator(input_size=(288, 288), stride_size=self.stride_size, mask_ratio=0.5)
         dataset = SonarDataset(data_dir="./dataset", ext="*.npy")
         transform = SonarDataTransform(local_crops_number=8)
         
@@ -245,42 +245,38 @@ class Trainer:
             student_global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['student']['global_crops']]
             student_local_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['student']['local_crops']]
 
-            # We only mask global crops for iBOT.
-            # Mask shape: (B, N_patches)
             B = student_global_crops[0].shape[0]
             masks_list = []
-            for _ in range(B * 2):  # 2 global crops per image
-                m = self.mask_generator()
+            for _ in range(B * 2): 
+                m = self.mask_generator() # 1/True usually means "Drop" here
                 masks_list.append(torch.from_numpy(m).bool())
-            masks = torch.stack(masks_list).to(self.device)  # (2*B, N_patches)
 
-            # We need to upsample the mask from (28x28) to (224x224) to zero out pixels
-            mask_grid_h = 224 // self.stride_size 
-            mask_grid_w = 224 // self.stride_size
+            # Original iBOT mask (2*B, N_patches). True = Dropped.
+            masks = torch.stack(masks_list).to(self.device)
 
-            # Reshape to (2*B, 1, 7, 7)
-            masks_spatial = masks.view(-1, 1, mask_grid_h, mask_grid_w)
-            # Upsample nearest neighbor to (2*B, 1, 224, 224)
-            masks_upsampled = F.interpolate(masks_spatial.float(), size=(224, 224), mode='nearest')
+            mask_grid_h = student_global_crops[0].shape[-2] // 32 
+            mask_grid_w = student_global_crops[0].shape[-1] // 32
 
-            # Create masked input for student
-            # We concatenate the two global lists to batch process
-            global_concat = torch.cat(student_global_crops, dim=0)  # (2*B, 1, 224, 224)
-            masked_global_inputs = global_concat * (1 - masks_upsampled)  # Zero out masked areas
+            masks_spatial = masks.view(-1, mask_grid_h, mask_grid_w)
+            active_masks = ~masks_spatial 
+
+            # Split the active mask into two chunks for the two global crops
+            active_masks_chunked = list(torch.chunk(active_masks, 2, dim=0))
+
+            all_student_crops = student_global_crops + student_local_crops
+            all_student_masks = active_masks_chunked + [None] * len(student_local_crops)  # Local crops don't get masked
 
             with torch.amp.autocast('cuda'):
                 with torch.no_grad():
-                    teacher_output, teacher_patches_list, _ = self.teacher(teacher_global_crops)
+                    # Teacher gets no masks
+                    teacher_output, teacher_patches_list, _ = self.teacher(teacher_global_crops, masks=None)
+                    
                     t_patches = torch.cat(teacher_patches_list, dim=0)  # (2*B, N, D)
                     t_patches_masked = t_patches[masks.bool()]  # (Total_Masked_Tokens, D)
                     t_ibot_out = self.teacher_ibot_head(t_patches_masked)  # (Total_Masked_Tokens, K)
 
-                # STUDENT: Sees MASKED Global + FULL Local
-                # We need to reconstruct the list for MultiCropWrapper
-                masked_global_list = torch.chunk(masked_global_inputs, 2, dim=0)
-                all_student_crops = list(masked_global_list) + student_local_crops
-
-                student_output, student_patches_list, student_cls = self.student(all_student_crops)
+                # Student gets the crops AND the masks
+                student_output, student_patches_list, student_cls = self.student(all_student_crops, masks=all_student_masks)
 
                 current_teacher_temp = self.teacher_temp_schedule[it]
                 loss_dino = self.dino_loss_fn(student_output, teacher_output, current_teacher_temp)
@@ -323,8 +319,7 @@ class Trainer:
             del teacher_global_crops, teacher_local_crops, student_global_crops, student_local_crops, masks
             del student_patches_list, teacher_patches_list
             del student_cls
-            del masked_global_inputs, masks_upsampled
-            del all_student_crops
+            del all_student_crops, all_student_masks
 
             if (i + 1) % self.accum_iter == 0:
                 self.scaler.unscale_(self.optimizer)
