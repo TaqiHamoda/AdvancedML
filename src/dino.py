@@ -231,18 +231,10 @@ class ConvNeXtV2(nn.Module):
             self.stages.append(stage_blocks)
             cur += depths[i]
 
-        self.norm_stages = nn.ModuleList()
-        for i in range(1, 4):
-            self.norm_stages.append(LayerNorm(dims[i], eps=1e-6, data_format="channels_first"))
-
-        # Projection is now spatial (Conv2d) instead of Linear
-        self.fusion_proj = nn.Conv2d(dims[1] + dims[2] + dims[3], dims[-1], kernel_size=1)
-        
         # Separate norms for 2D spatial patches vs 1D CLS token
         self.norm_patch = LayerNorm(dims[-1], eps=1e-6, data_format="channels_first")
         self.norm_cls = nn.LayerNorm(dims[-1], eps=1e-6) 
-        
-        # Embedded Decoder
+
         self.decoder = ConvNeXtV2Decoder(encoder_dim=dims[-1], decoder_dim=512)
 
         self.apply(self._init_weights)
@@ -255,10 +247,9 @@ class ConvNeXtV2(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x, mask=None):
-        hypercolumn = None  
-        
         for i in range(4):
             x = self.downsample_layers[i](x)
+
             if mask is not None:
                 current_mask = F.interpolate(mask.unsqueeze(1).float(), size=x.shape[-2:], mode='nearest').squeeze(1).bool()
                 x_sparse = dense_to_sparse(x, current_mask)
@@ -270,22 +261,10 @@ class ConvNeXtV2(nn.Module):
                 x_sparse = block(x_sparse)
 
             x = x_sparse.dense()
-            if i < 1: continue
-
-            x_i = self.norm_stages[i - 1](x)
-            if mask is not None:  # Clean up bias leakage before Hypercolumn
-                mask_i = F.interpolate(mask.unsqueeze(1).float(), size=x_i.shape[-2:], mode='nearest')
-                x_i = x_i * mask_i
-
-            if hypercolumn is None:
-                hypercolumn = x_i
-            else:
-                x_i = F.interpolate(x_i, size=hypercolumn.shape[-2:], mode='nearest')
-                hypercolumn = torch.cat([hypercolumn, x_i], dim=1)
 
         # Global CLS Branch
         if mask is not None:
-            # Clean up bias leakage before Global Pooling
+            # Clean up bias leakage in empty space before Global Pooling
             mask_x = F.interpolate(mask.unsqueeze(1).float(), size=x.shape[-2:], mode='nearest')
             x = x * mask_x
 
@@ -297,10 +276,7 @@ class ConvNeXtV2(nn.Module):
             x_cls = x.mean([-2, -1])
 
         x_cls = self.norm_cls(x_cls)
-
-        # Patch Fusion Branch (Spatial)
-        x_patch_spatial = self.fusion_proj(hypercolumn)
-        x_patch_spatial = self.norm_patch(x_patch_spatial) 
+        x_patch_spatial = self.norm_patch(x) 
 
         # Conditional Decoding
         if mask is not None:

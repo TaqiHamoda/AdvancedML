@@ -189,17 +189,18 @@ class KoLeoLoss(nn.Module):
         x = F.normalize(student_output, dim=-1, p=2)
 
         # Gather all features from other GPUs
-        if dist.is_initialized():
-            # Gather all tensors
-            gathered_x = [torch.zeros_like(x) for _ in range(dist.get_world_size())]
-            dist.all_gather(gathered_x, x)
-            all_x = torch.cat(gathered_x, dim=0)
+        with torch.no_grad():
+            if dist.is_initialized():
+                # Gather all tensors
+                gathered_x = [torch.zeros_like(x) for _ in range(dist.get_world_size())]
+                dist.all_gather(gathered_x, x)
+                all_x = torch.cat(gathered_x, dim=0)
 
-            # Identify which part of the global batch is local
-            # We compute gradients only for local x, but use all_x for neighbor search
-            rank = dist.get_rank()
-        else:
-            all_x = x
+                # Identify which part of the global batch is local
+                # We compute gradients only for local x, but use all_x for neighbor search
+                rank = dist.get_rank()
+            else:
+                all_x = x
 
         # Compute dot products between LOCAL features and GLOBAL features
         # shape: (Local_B, Global_B)

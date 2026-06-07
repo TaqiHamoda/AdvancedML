@@ -131,6 +131,11 @@ class SonarDataTransform:
     ):
         self.local_crops_number = local_crops_number
 
+        self.flips = v2.Compose([
+            v2.RandomHorizontalFlip(p=0.5),
+            v2.RandomVerticalFlip(p=0.5),
+        ])
+
         # Note: RandomResizedCrop is not used since it can distort the aspect ratio leading to uniform stretching
         # which breaks the physics of sonar imagery. Instead, we use RandomCrop to maintain the original aspect
         # ratio and spatial relationships.
@@ -141,8 +146,6 @@ class SonarDataTransform:
         # If you want to make the image or objects unclear, increase the noise instead to remain
         # accurate to the physics. (Interference is a more accurate way to model "blur" or loss of clarity)
         self.augmentations = v2.Compose([
-            v2.RandomHorizontalFlip(p=0.5),
-            v2.RandomVerticalFlip(p=0.5),
             TVGAttenuation(retention=(0.00, 0.75), p=0.3),  # TVG Attenuation to simulate propagation loss
             v2.RandomApply([v2.ColorJitter(
                 brightness=(1.00, 1.15),                    # Brightness corresponds to sonar gain (intensity)
@@ -161,7 +164,7 @@ class SonarDataTransform:
         # --- Global Crops (2 views) ---
         # Used by both Teacher and Student
         for _ in range(2):
-            crop_aug = self.global_crop(image)
+            crop_aug = self.flips(self.global_crop(image))
             teacher_crops.append(self.normalize(crop_aug.clone()))
 
             full_aug = self.augmentations(crop_aug)
@@ -170,7 +173,7 @@ class SonarDataTransform:
         # --- Local Crops (8+ views) ---
         # Used by Student only to encourage local-to-global correspondence
         for _ in range(self.local_crops_number):
-            crop_aug = self.local_crop(image)
+            crop_aug = self.flips(self.local_crop(image))
             teacher_crops.append(self.normalize(crop_aug.clone()))
 
             full_aug = self.augmentations(crop_aug)
