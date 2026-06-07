@@ -4,7 +4,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-import torch.nn.functional as F
+from contextlib import nullcontext
 
 import numpy as np
 import logging
@@ -130,11 +130,13 @@ class Trainer:
         )
 
         # --- Schedulers ---
+        self.effective_niter_per_ep = (len(self.loader) + self.accum_iter - 1) // self.accum_iter
+
         self.teacher_temp_schedule = cosine_scheduler(
             base_value=self.teacher_temp_start,
             final_value=self.teacher_temp_end,
             epochs=self.epochs,
-            niter_per_ep=len(self.loader),
+            niter_per_ep=self.effective_niter_per_ep,
             warmup_epochs=self.warmup_epochs,
             start_warmup_value=self.teacher_temp_start,
         )
@@ -143,7 +145,7 @@ class Trainer:
             base_value=self.base_lr,
             final_value=self.min_lr,
             epochs=self.epochs,
-            niter_per_ep=len(self.loader),
+            niter_per_ep=self.effective_niter_per_ep,
             warmup_epochs=self.warmup_epochs,
             start_warmup_value=0,
         )
@@ -152,14 +154,14 @@ class Trainer:
             base_value=self.weight_decay_start,
             final_value=self.weight_decay_end,
             epochs=self.epochs,
-            niter_per_ep=len(self.loader),
+            niter_per_ep=self.effective_niter_per_ep,
         )
 
         self.momentum_schedule = cosine_scheduler(
             base_value=self.momentum_teacher_start,
             final_value=self.momentum_teacher_end,
             epochs=self.epochs,
-            niter_per_ep=len(self.loader),
+            niter_per_ep=self.effective_niter_per_ep,
         )
 
         self.scaler = torch.amp.GradScaler('cuda')
@@ -230,7 +232,8 @@ class Trainer:
 
         self.optimizer.zero_grad(set_to_none=True) # Ensure gradients are zero at start
         for i, batch_imgs in enumerate(self.loader):
-            it = len(self.loader) * epoch_index + i
+            optim_step = i // self.accum_iter
+            it = self.effective_niter_per_ep * epoch_index + optim_step
 
             # LR Update
             current_lr = self.lr_schedule[it]
@@ -270,51 +273,60 @@ class Trainer:
 
             masks_flat = masks.view(masks.shape[0], -1).bool()
 
-            with torch.amp.autocast('cuda'):
-                with torch.no_grad():
-                    # Teacher gets no masks
-                    teacher_output, teacher_patches_list, _ = self.teacher(teacher_global_crops, masks=None)
-                    
-                    t_patches = torch.cat(teacher_patches_list, dim=0)  # (2*B, N, D)
-                    t_patches_masked = t_patches[masks_flat]  # (Total_Masked_Tokens, D)
-                    t_ibot_out = self.teacher_ibot_head(t_patches_masked)  # (Total_Masked_Tokens, K)
+            is_accumulating = ((i + 1) % self.accum_iter != 0) and ((i + 1) != len(self.loader))
+            if self.is_distributed and is_accumulating:
+                ctx_student = self.student.no_sync()
+                ctx_ibot = self.student_ibot_head.no_sync()
+            else:
+                ctx_student = nullcontext()
+                ctx_ibot = nullcontext()
 
-                # Student gets the crops AND the masks
-                student_output, student_patches_list, student_cls = self.student(all_student_crops, masks=all_student_masks)
+            with ctx_student, ctx_ibot:
+                with torch.amp.autocast('cuda'):
+                    with torch.no_grad():
+                        # Teacher gets no masks
+                        teacher_output, teacher_patches_list, _ = self.teacher(teacher_global_crops, masks=None)
+                        
+                        t_patches = torch.cat(teacher_patches_list, dim=0)  # (2*B, N, D)
+                        t_patches_masked = t_patches[masks_flat]  # (Total_Masked_Tokens, D)
+                        t_ibot_out = self.teacher_ibot_head(t_patches_masked)  # (Total_Masked_Tokens, K)
 
-                current_teacher_temp = self.teacher_temp_schedule[it]
-                loss_dino = self.dino_loss_fn(student_output, teacher_output, current_teacher_temp)
+                    # Student gets the crops AND the masks
+                    student_output, student_patches_list, student_cls = self.student(all_student_crops, masks=all_student_masks)
 
-                # iBOT Loss (Patch tokens)
-                # Select only the global crop patches from student output (first 2 items)
-                s_global_patches = student_patches_list[0]  # (2*B, N, D)
-                s_patches_masked = s_global_patches[masks_flat]  # (Total_Masked_Tokens, D)
-                s_ibot_out = self.student_ibot_head(s_patches_masked)  # (Total_Masked_Tokens, K)
-                loss_ibot = self.ibot_loss_fn(
-                    s_ibot_out,
-                    t_ibot_out,
-                    masks,
-                    current_teacher_temp
-                )
+                    current_teacher_temp = self.teacher_temp_schedule[it]
+                    loss_dino = self.dino_loss_fn(student_output, teacher_output, current_teacher_temp)
 
-                n_global = len(student_global_crops)
-                student_cls_chunked = student_cls.chunk(len(all_student_crops))
-                student_global_cls = torch.cat(student_cls_chunked[:n_global])
-                loss_koleo = self.koleo_loss_fn(student_global_cls)
+                    # iBOT Loss (Patch tokens)
+                    # Select only the global crop patches from student output (first 2 items)
+                    s_global_patches = student_patches_list[0]  # (2*B, N, D)
+                    s_patches_masked = s_global_patches[masks_flat]  # (Total_Masked_Tokens, D)
+                    s_ibot_out = self.student_ibot_head(s_patches_masked)  # (Total_Masked_Tokens, K)
+                    loss_ibot = self.ibot_loss_fn(
+                        s_ibot_out,
+                        t_ibot_out,
+                        masks,
+                        current_teacher_temp
+                    )
 
-                loss_gram = self.gram_loss_fn(student_patches_list[0], teacher_patches_list[0])
-                loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)
-                loss = loss / self.accum_iter  # Normalize loss to account for accumulation
+                    n_global = len(student_global_crops)
+                    student_cls_chunked = student_cls.chunk(len(all_student_crops))
+                    student_global_cls = torch.cat(student_cls_chunked[:n_global])
+                    loss_koleo = self.koleo_loss_fn(student_global_cls)
 
-            # Log only on Master
-            if self.rank == 0 and i % self.accum_iter == 0:
-                logger.info(f"Epoch {epoch_index:03d} [{i:04d}/{len(self.loader)}] "
-                    f"lr: {current_lr:.6f}, temp: {self.teacher_temp_schedule[it]:.4f}, "
-                    f"m: {self.momentum_schedule[it]:.4f}, wd: {self.wd_schedule[it]:.4f}, "
-                    f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
+                    loss_gram = self.gram_loss_fn(student_patches_list[0], teacher_patches_list[0])
+                    loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)
+                    loss = loss / self.accum_iter  # Normalize loss to account for accumulation
 
-            # Backward pass (Accumulates gradients into .grad attributes)
-            self.scaler.scale(loss).backward()
+                # Log only on Master
+                if self.rank == 0 and i % self.accum_iter == 0:
+                    logger.info(f"Epoch {epoch_index:03d} [{i:04d}/{len(self.loader)}] "
+                        f"lr: {current_lr:.6f}, temp: {self.teacher_temp_schedule[it]:.4f}, "
+                        f"m: {self.momentum_schedule[it]:.4f}, wd: {self.wd_schedule[it]:.4f}, "
+                        f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
+
+                # Backward pass (Accumulates gradients into .grad attributes)
+                self.scaler.scale(loss).backward()
 
             # Manually delete heavy tensors to free VRAM for the next iteration
             del loss, loss_ibot, loss_gram, loss_koleo
