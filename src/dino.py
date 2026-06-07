@@ -232,7 +232,7 @@ class ConvNeXtTiny(nn.Module):
             if hypercolumn is None:
                 hypercolumn = x_i
             else:
-                x_i = F.interpolate(x_i, size=hypercolumn.shape[-2:], mode='bilinear')
+                x_i = F.interpolate(x_i, size=hypercolumn.shape[-2:], mode='nearest')
                 hypercolumn = torch.cat([hypercolumn, x_i], dim=1)
 
         # Global CLS Branch
@@ -242,7 +242,7 @@ class ConvNeXtTiny(nn.Module):
             x = x * mask_x
 
             # current_mask is True for active tokens. We count them to get the denominator.
-            active_count = current_mask.sum(dim=(-1, -2), keepdim=True) + 1e-6
+            active_count = current_mask.sum(dim=(-1, -2)).unsqueeze(-1) + 1e-6
             # Sum over spatial dims and divide by valid tokens
             x_cls = x.sum([-2, -1]) / active_count
         else:
