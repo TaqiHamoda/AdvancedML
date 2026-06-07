@@ -232,7 +232,14 @@ class ConvNeXtTiny(nn.Module):
                 hypercolumn = torch.cat([hypercolumn, x_i], dim=1)
 
         # Global CLS Branch
-        x_cls = x.mean([-2, -1])  
+        if mask is not None:
+            # current_mask is True for active tokens. We count them to get the denominator.
+            active_count = current_mask.sum(dim=(-1, -2), keepdim=True) + 1e-6
+            # Sum over spatial dims and divide by valid tokens
+            x_cls = x.sum([-2, -1]) / active_count
+        else:
+            x_cls = x.mean([-2, -1])
+
         x_cls = self.norm_cls(x_cls)
 
         # Patch Fusion Branch (Spatial)

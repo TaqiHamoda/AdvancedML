@@ -75,7 +75,7 @@ class Trainer:
             logger.info(f"Training on {self.device} (World Size: {self.world_size})")
 
         self.output_dim = 1024  # Original 65536 vector is too large for our batch size
-        self.stride_size = 8
+        self.stride_size = 32
 
         # --- Hyperparameters ---
         self.batch_size = 50  # Max possible per GPU
