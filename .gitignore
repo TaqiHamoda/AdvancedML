@@ -1,9 +1,12 @@
 # User-defined
 *.zip
-dataset/
+data/
 logs/
 weights/
 results/
+deps/
+temp/
+TODO.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -12,7 +12,7 @@ from tqdm import tqdm
 import os, time
 
 # Import your modules
-from sonar_data import MaskingGenerator, SonarDataset, SonarDataTransform
+from dataloader import MaskingGenerator, SonarDataset, SonarDataTransform
 from dino import ConvNeXtTiny, DINOHead, MultiCropWrapper
 from losses import DINOLoss, iBOTPatchLoss, GramLoss, KoLeoLoss
 
@@ -74,12 +74,12 @@ class Trainer:
         if self.rank == 0:
             logger.info(f"Training on {self.device} (World Size: {self.world_size})")
 
-        self.output_dim = 4096  # Original 65536 vector is too large for our batch size
+        self.output_dim = 1024  # Original 65536 vector is too large for our batch size
         self.stride_size = 8
 
         # --- Hyperparameters ---
         self.batch_size = 50  # Max possible per GPU
-        self.effective_batch_size = self.output_dim  # Desired batch size
+        self.effective_batch_size = 4096  # Desired batch size
         self.accum_iter = self.effective_batch_size // self.batch_size  # Number of gradient accumulation steps
         self.base_lr = 0.0010
         self.min_lr = 1e-6
@@ -89,7 +89,7 @@ class Trainer:
 
         self.teacher_temp_start = 0.04
         self.teacher_temp_end = 0.07
-        self.momentum_teacher_start = 0.992
+        self.momentum_teacher_start = 0.996
         self.momentum_teacher_end = 1.0
         self.weight_decay_start = self.weight_decay
         self.weight_decay_end = 0.4

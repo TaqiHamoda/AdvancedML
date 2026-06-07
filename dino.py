@@ -128,7 +128,7 @@ class ConvNeXtTiny(nn.Module):
 
     def forward(self, x):
         # x shape: (N, 1, H, W)
-        hypercolumn = None
+        hypercolumn = None  # (N, C1 + C2 + C3, H/8, W/8)
         for i in range(4):
             x = self.downsample_layers[i](x)
             x = self.stages[i](x)
@@ -146,14 +146,14 @@ class ConvNeXtTiny(nn.Module):
         # --- Global CLS Branch ---
         # x is now (N, 768, H/32, W/32)
         # Global Pooling for [CLS] token analog
-        x_cls = x.mean([-2, -1]) # (N, 768)
+        x_cls = x.mean([-2, -1])  # (N, 768)
         x_cls = self.norm(x_cls)
 
         # --- Patch Fusion Branch ---
         # Project & Final Normalize
-        x_patch = hypercolumn.flatten(2).transpose(1, 2)   # (N, 196, 1344)
-        x_patch = self.fusion_proj(x_patch)                # (N, 196, 768)
-        x_patch = self.norm(x_patch)                # Normalized (N, 196, 768)
+        x_patch = hypercolumn.flatten(2).transpose(1, 2)   # (N, H*W/64, 1344)
+        x_patch = self.fusion_proj(x_patch)                # (N, H*W/64, 768)
+        x_patch = self.norm(x_patch)                # Normalized (N, H*W/64, 768)
 
         return x_cls, x_patch
 

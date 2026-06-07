@@ -5,3 +5,8 @@ tqdm
 opencv-python
 scikit-learn
 matplotlib
+pyxtf
+submitit
+timm==0.3.2
+tensorboardX
+six
