@@ -312,7 +312,7 @@ class Trainer:
                     student_cls_chunked = student_cls.chunk(len(all_student_crops))
                     loss_koleo = self.koleo_loss_fn(student_cls_chunked[0])  # Pass ONLY the first global crop (unique independent images)
 
-                    loss_gram = self.gram_loss_fn(student_patches_list[0], teacher_patches_list[1])
+                    loss_gram = self.gram_loss_fn(student_patches_list[0], teacher_patches_list[0])
                     loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)
                     loss = loss / self.accum_iter  # Normalize loss to account for accumulation
 
