@@ -169,14 +169,6 @@ class GramLoss(nn.Module):
         student_gram = torch.bmm(student_patches.transpose(1, 2), student_patches)
         teacher_gram = torch.bmm(teacher_patches.transpose(1, 2), teacher_patches)
 
-        # Normalize by the number of patches to prevent scaling issues
-        N = student_patches.shape[1]
-        student_gram = student_gram / N
-        teacher_gram = teacher_gram / N
-
-        student_gram = student_gram.clamp(min=0)
-        teacher_gram = teacher_gram.clamp(min=0)
-
         return self.mse(student_gram, teacher_gram)
 
 
