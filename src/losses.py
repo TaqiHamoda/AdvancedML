@@ -215,3 +215,123 @@ class KoLeoLoss(nn.Module):
         distances = self.pdist(x, nearest_neighbors)
 
         return -torch.log(distances).mean()
+
+
+class HSICLoss(nn.Module):
+    """
+    Computes the Hilbert-Schmidt Independence Criterion (HSIC) to measure 
+    dependence between learned features and a target variable (e.g., distance).
+    Minimizing this loss encourages the features to be independent of the target.
+    """
+    def __init__(self):
+        super().__init__()
+
+    def rbf_kernel(self, X):
+        # X shape: [N, D]
+        X_sq = torch.sum(X ** 2, dim=-1)
+        # Compute squared Euclidean distances: ||x_i - x_j||^2
+        dist_sq = X_sq.unsqueeze(1) + X_sq.unsqueeze(0) - 2 * torch.matmul(X, X.t())
+        dist_sq = torch.clamp(dist_sq, min=0.0) # Numerical stability
+
+        # Median heuristic for sigma
+        upper_tri = dist_sq.triu(diagonal=1).flatten()
+        upper_tri = upper_tri[upper_tri > 0]
+
+        if upper_tri.numel() > 0:
+            median_dist_sq = torch.median(upper_tri)
+        else:
+            median_dist_sq = torch.tensor(1.0, device=dist_sq.device)
+
+        sigma_sq = torch.clamp(median_dist_sq, min=1e-4)
+
+        # RBF Kernel K(x_i, x_j) = exp(-||x_i - x_j||^2 / 2*sigma^2)
+        return torch.exp(-dist_sq / (2 * sigma_sq))
+
+    def forward(self, features, targets):
+        """
+        features: [N, D_f] (Patch features flattened across batch)
+        targets:  [N, D_t] (Patch distances flattened across batch)
+        """
+        N = features.size(0)
+
+        K = self.rbf_kernel(features)
+        L = self.rbf_kernel(targets)
+
+        # Double centering the matrices
+        K_mean_row = K.mean(dim=0, keepdim=True)
+        K_mean_col = K.mean(dim=1, keepdim=True)
+        K_mean_all = K.mean()
+        Kc = K - K_mean_row - K_mean_col + K_mean_all
+
+        L_mean_row = L.mean(dim=0, keepdim=True)
+        L_mean_col = L.mean(dim=1, keepdim=True)
+        L_mean_all = L.mean()
+        Lc = L - L_mean_row - L_mean_col + L_mean_all
+
+        # HSIC calculation (Trace of Kc * Lc normalized)
+        return torch.sum(Kc * Lc) / ((N - 1) ** 2)
+
+
+class LinearHSICLoss(nn.Module):
+    """
+    Lightweight HSIC computation using a Linear Kernel.
+    Computes the squared Frobenius norm of the cross-covariance matrix.
+    Complexity: O(N * D_x * D_y) instead of O(N^2)
+    """
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, features, targets):
+        """
+        features: [N, D_f] (e.g., 1024-dim patch features)
+        targets:  [N, D_t] (e.g., 1-dim nadir distances)
+        """
+        N = features.size(0)
+
+        # Mean-center the features and targets over the batch
+        features_c = features - features.mean(dim=0, keepdim=True)
+        targets_c = targets - targets.mean(dim=0, keepdim=True)
+
+        # Compute the cross-covariance matrix C (Shape: D_f x D_t)
+        C = torch.matmul(features_c.t(), targets_c) / (N - 1)
+
+        # HSIC is the squared Frobenius norm of the cross-covariance matrix
+        return torch.sum(C ** 2)
+
+
+class RFFHSICLoss(nn.Module):
+    """
+    Lightweight non-linear HSIC using Random Fourier Features (RFF).
+    Approximates the RBF kernel without the O(N^2) memory bottleneck.
+    """
+    def __init__(self, feature_dim, target_dim=1, num_rff=128, sigma=1.0):
+        super().__init__()
+        self.num_rff = num_rff
+        
+        # Random projection weights (fixed during training)
+        # Drawn from a Gaussian distribution to approximate RBF
+        self.register_buffer('W_f', torch.randn(feature_dim, num_rff) / sigma)
+        self.register_buffer('b_f', torch.rand(num_rff) * 2 * torch.pi)
+        
+        self.register_buffer('W_t', torch.randn(target_dim, num_rff) / sigma)
+        self.register_buffer('b_t', torch.rand(num_rff) * 2 * torch.pi)
+
+    def get_rff(self, x, W, b):
+        # Applies the randomized feature mapping: sqrt(2/D) * cos(XW + b)
+        projection = torch.matmul(x, W) + b
+        return torch.sqrt(2.0 / self.num_rff) * torch.cos(projection)
+
+    def forward(self, features, targets):
+        N = features.size(0)
+
+        # Map features and targets to the RFF space
+        Z_f = self.get_rff(features, self.W_f, self.b_f)
+        Z_t = self.get_rff(targets, self.W_t, self.b_t)
+
+        # Mean-center the RFF representations
+        Z_f_c = Z_f - Z_f.mean(dim=0, keepdim=True)
+        Z_t_c = Z_t - Z_t.mean(dim=0, keepdim=True)
+
+        # Compute Linear HSIC on the RFF features
+        C = torch.matmul(Z_f_c.t(), Z_t_c) / (N - 1)
+        return torch.sum(C ** 2)

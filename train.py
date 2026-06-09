@@ -14,7 +14,7 @@ import os, time
 # Import your modules
 from src.dataset import MaskingGenerator, SonarDataset, SonarDataTransform
 from src.dino import ConvNeXtV2, DINOHead, MultiCropWrapper
-from src.losses import DINOLoss, iBOTPatchLoss, GramLoss, KoLeoLoss
+from src.losses import DINOLoss, iBOTPatchLoss, GramLoss, KoLeoLoss, HSICLoss, LinearHSICLoss, RFFHSICLoss
 
 logger = logging.getLogger(__name__)
 
@@ -35,20 +35,21 @@ def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epoch
 
 def dino_collate_fn(batch):
     output = {
-        'teacher': {
-            'global_crops': [],
-            'local_crops': []
-        },
-        'student': {
-            'global_crops': [],
-            'local_crops': []
-        },
+        'teacher': {'global_crops': [], 'local_crops': []},
+        'student': {'global_crops': [], 'local_crops': []},
     }
 
+    # Collate standard crops
     for model in output.keys():
         for crop in output[model].keys():
             for i in range(len(batch[0][model][crop])):
                 output[model][crop].append(torch.stack([item[model][crop][i] for item in batch]))
+
+    # Collate HSIC data
+    output['hsic'] = {
+        'data': torch.stack([item['hsic']['data'] for item in batch]),
+        'distances': torch.stack([item['hsic']['distances'] for item in batch])
+    }
 
     return output
 
@@ -98,6 +99,7 @@ class Trainer:
         self.w_ibot = 1.0
         self.w_gram = 0.5
         self.w_koleo = 0.1
+        self.w_hsic = 0.1
 
         # --- Masking, Data & Sampler ---
         self.mask_generator = MaskingGenerator(input_size=(288, 288), stride_size=self.stride_size, mask_ratio=0.5)
@@ -203,6 +205,7 @@ class Trainer:
         self.dino_loss_fn = DINOLoss(out_dim=self.output_dim).to(self.device)
         self.ibot_loss_fn = iBOTPatchLoss(out_dim=self.output_dim).to(self.device)
         self.gram_loss_fn = GramLoss().to(self.device)
+        self.hsic_loss_fn = RFFHSICLoss(feature_dim=self.output_dim).to(self.device)
         self.koleo_loss_fn = KoLeoLoss().to(self.device)
 
         # --- Optimizer ---
@@ -309,12 +312,33 @@ class Trainer:
                         current_teacher_temp
                     )
 
+                    # HSIC Loss (View Independence)
+                    hsic_imgs = batch_imgs['hsic']['data'].to(self.device, non_blocking=True)
+                    hsic_dists = batch_imgs['hsic']['distances'].to(self.device, non_blocking=True)
+
+                    # Forward pass the uncropped image to get its patches
+                    _, hsic_patches_list, _ = self.student([hsic_imgs], masks=[None])
+                    hsic_patches = hsic_patches_list[0]  # Shape: (B, N_patches, D)
+
+                    # Downsample the 384x384 distance map to match the patch grid resolution
+                    B_h, C_h, H_h, W_h = hsic_imgs.shape
+                    grid_h, grid_w = H_h // self.stride_size, W_h // self.stride_size
+
+                    hsic_dists_down = torch.nn.functional.adaptive_avg_pool2d(hsic_dists, (grid_h, grid_w))
+                    hsic_dists_flat = hsic_dists_down.view(B_h, -1, 1)  # (B, N_patches, 1)
+
+                    # Compute statistical independence between patches and distances
+                    loss_hsic = self.hsic_loss_fn(
+                        hsic_patches.view(-1, hsic_patches.shape[-1]), # Flatten -> (B * N_patches, D)
+                        hsic_dists_flat.view(-1, 1)                    # Flatten -> (B * N_patches, 1)
+                    )
+
                     student_cls_chunked = student_cls.chunk(len(all_student_crops))
                     loss_koleo = self.koleo_loss_fn(student_cls_chunked[0])  # Pass ONLY the first global crop (unique independent images)
 
                     # loss_gram = self.gram_loss_fn(student_patches_list[0], teacher_patches_list[0])
                     # loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)
-                    loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_koleo * loss_koleo)
+                    loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_hsic * loss_hsic) + (self.w_koleo * loss_koleo)
                     loss = loss / self.accum_iter  # Normalize loss to account for accumulation
 
                 # Log only on Master
@@ -322,7 +346,8 @@ class Trainer:
                     logger.info(f"Epoch {epoch_index:03d} [{i:04d}/{len(self.loader)}] "
                         f"lr: {current_lr:.6f}, temp: {self.teacher_temp_schedule[it]:.4f}, "
                         f"m: {self.momentum_schedule[it]:.4f}, wd: {self.wd_schedule[it]:.4f}, "
-                        f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
+                        f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, HSIC: {loss_hsic.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
+                        # f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
 
                 # Backward pass (Accumulates gradients into .grad attributes)
                 self.scaler.scale(loss).backward()
