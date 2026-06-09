@@ -115,7 +115,7 @@ class SonarDataset(Dataset):
         if torch.isnan(distances).any() or torch.isinf(distances).any():
             distances = torch.nan_to_num(distances, nan=0.0, posinf=2.0, neginf=0.0)
 
-        return data#, distances
+        return data, distances
 
 
 class SonarDataTransform:
@@ -157,9 +157,16 @@ class SonarDataTransform:
 
         self.normalize = NormalizeTransform()
 
-    def __call__(self, image):
+    def __call__(self, data):
         teacher_crops = []
         student_crops = []
+
+        image, distances = data
+
+        if torch.any(distances > 1):
+            distances = distances - 1  # Starboard normalized dist from nadir
+        else:
+            distances = 1 - distances  # Port normalized dist from nadir
 
         # --- Global Crops (2 views) ---
         # Used by both Teacher and Student
@@ -188,6 +195,10 @@ class SonarDataTransform:
                 'global_crops': student_crops[:2],
                 'local_crops': student_crops[2:]
             },
+            'hsic': {
+                'data': self.normalize(image),
+                'distances': distances
+            }
         }
 
 
