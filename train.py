@@ -45,12 +45,6 @@ def dino_collate_fn(batch):
             for i in range(len(batch[0][model][crop])):
                 output[model][crop].append(torch.stack([item[model][crop][i] for item in batch]))
 
-    # Collate HSIC data
-    output['hsic'] = {
-        'data': torch.stack([item['hsic']['data'] for item in batch]),
-        'distances': torch.stack([item['hsic']['distances'] for item in batch])
-    }
-
     return output
 
 
@@ -75,36 +69,38 @@ class Trainer:
         if self.rank == 0:
             logger.info(f"Training on {self.device} (World Size: {self.world_size})")
 
-        self.output_dim = 1024  # Original 65536 vector is too large for our batch size
+        # Data Parameters
         self.stride_size = 32
+        self.tile_size = 384
+        self.global_crop_size = 288
+        self.local_crop_size = 96
 
         # --- Hyperparameters ---
-        self.batch_size = 20  # Max possible per GPU
+        self.output_dim = 8192  # Number of class tokens outputted by DINO Head
+        self.batch_size = 15  # Max possible per GPU
         self.effective_batch_size = 4096  # Desired batch size
         self.accum_iter = self.effective_batch_size // self.batch_size  # Number of gradient accumulation steps
-        self.base_lr = 0.0010
-        self.min_lr = 1e-6
+        self.base_lr = 1e-3
+        self.min_lr = 1e-3
         self.weight_decay = 0.04
         self.epochs = 100
         self.warmup_epochs = self.epochs // 10
 
         self.teacher_temp_start = 0.04
         self.teacher_temp_end = 0.07
-        self.momentum_teacher_start = 0.996
+        self.momentum_teacher_start = 0.994
         self.momentum_teacher_end = 1.0
-        self.weight_decay_start = self.weight_decay
-        self.weight_decay_end = 0.4
 
         self.w_dino = 1.0
         self.w_ibot = 1.0
         self.w_gram = 0.5
+        self.w_hsic = 0.0
         self.w_koleo = 0.1
-        self.w_hsic = 0.1
 
         # --- Masking, Data & Sampler ---
-        self.mask_generator = MaskingGenerator(input_size=(288, 288), stride_size=self.stride_size, mask_ratio=0.5)
-        dataset = SonarDataset()
-        transform = SonarDataTransform(local_crops_number=8)
+        self.mask_generator = MaskingGenerator(input_size=self.global_crop_size, stride_size=self.stride_size, mask_ratio=0.5)
+        dataset = SonarDataset(tile_size=self.tile_size)
+        transform = SonarDataTransform(local_crops_number=8, global_crops_size=self.global_crop_size, local_crops_size=self.local_crop_size)
         
         # Wrapper class to apply transform on the fly
         class TransformedDataset(torch.utils.data.Dataset):
@@ -125,7 +121,7 @@ class Trainer:
             batch_size=self.batch_size,
             shuffle=(self.sampler is None),  # Shuffle handled by sampler if DDP
             sampler=self.sampler,
-            num_workers=16,
+            num_workers=70,
             pin_memory=True,
             drop_last=True,
             collate_fn=dino_collate_fn
@@ -150,13 +146,6 @@ class Trainer:
             niter_per_ep=self.effective_niter_per_ep,
             warmup_epochs=self.warmup_epochs,
             start_warmup_value=0,
-        )
-
-        self.wd_schedule = cosine_scheduler(
-            base_value=self.weight_decay_start,
-            final_value=self.weight_decay_end,
-            epochs=self.epochs,
-            niter_per_ep=self.effective_niter_per_ep,
         )
 
         self.momentum_schedule = cosine_scheduler(
@@ -240,16 +229,13 @@ class Trainer:
 
             # LR Update
             current_lr = self.lr_schedule[it]
-            current_wd = self.wd_schedule[it]
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = current_lr
                 # Only apply weight decay to the regularized group (index 0)
                 if param_group['weight_decay'] > 0:
-                    param_group['weight_decay'] = current_wd
+                    param_group['weight_decay'] = self.weight_decay
 
             teacher_global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['teacher']['global_crops']]
-            teacher_local_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['teacher']['local_crops']]
-
             student_global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['student']['global_crops']]
             student_local_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['student']['local_crops']]
 
@@ -262,8 +248,8 @@ class Trainer:
             # Original iBOT mask (2*B, N_patches). True = Dropped.
             masks = torch.stack(masks_list).to(self.device)
 
-            mask_grid_h = student_global_crops[0].shape[-2] // 32 
-            mask_grid_w = student_global_crops[0].shape[-1] // 32
+            mask_grid_h = student_global_crops[0].shape[-2] // self.stride_size
+            mask_grid_w = student_global_crops[0].shape[-1] // self.stride_size
 
             masks_spatial = masks.view(-1, mask_grid_h, mask_grid_w)
             active_masks = ~masks_spatial 
@@ -312,26 +298,7 @@ class Trainer:
                         current_teacher_temp
                     )
 
-                    # HSIC Loss (View Independence)
-                    hsic_imgs = batch_imgs['hsic']['data'].to(self.device, non_blocking=True)
-                    hsic_dists = batch_imgs['hsic']['distances'].to(self.device, non_blocking=True)
-
-                    # Forward pass the uncropped image to get its patches
-                    _, hsic_patches_list, _ = self.student([hsic_imgs], masks=[None])
-                    hsic_patches = hsic_patches_list[0]  # Shape: (B, N_patches, D)
-
-                    # Downsample the 384x384 distance map to match the patch grid resolution
-                    B_h, C_h, H_h, W_h = hsic_imgs.shape
-                    grid_h, grid_w = H_h // self.stride_size, W_h // self.stride_size
-
-                    hsic_dists_down = torch.nn.functional.adaptive_avg_pool2d(hsic_dists, (grid_h, grid_w))
-                    hsic_dists_flat = hsic_dists_down.view(B_h, -1, 1)  # (B, N_patches, 1)
-
-                    # Compute statistical independence between patches and distances
-                    loss_hsic = self.hsic_loss_fn(
-                        hsic_patches.view(-1, hsic_patches.shape[-1]), # Flatten -> (B * N_patches, D)
-                        hsic_dists_flat.view(-1, 1)                    # Flatten -> (B * N_patches, 1)
-                    )
+                    loss_hsic = None  # TODO: Implement
 
                     student_cls_chunked = student_cls.chunk(len(all_student_crops))
                     loss_koleo = self.koleo_loss_fn(student_cls_chunked[0])  # Pass ONLY the first global crop (unique independent images)
@@ -344,8 +311,7 @@ class Trainer:
                 # Log only on Master
                 if self.rank == 0 and i % self.accum_iter == 0:
                     logger.info(f"Epoch {epoch_index:03d} [{i:04d}/{len(self.loader)}] "
-                        f"lr: {current_lr:.6f}, temp: {self.teacher_temp_schedule[it]:.4f}, "
-                        f"m: {self.momentum_schedule[it]:.4f}, wd: {self.wd_schedule[it]:.4f}, "
+                        f"lr: {current_lr:.6f}, temp: {self.teacher_temp_schedule[it]:.4f}, m: {self.momentum_schedule[it]:.4f}, "
                         f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, HSIC: {loss_hsic.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
                         # f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
 
@@ -356,7 +322,7 @@ class Trainer:
             del loss, loss_ibot, loss_gram, loss_koleo
             del student_output, teacher_output
             del s_ibot_out, t_ibot_out
-            del teacher_global_crops, teacher_local_crops, student_global_crops, student_local_crops, masks
+            del teacher_global_crops, student_global_crops, student_local_crops, masks
             del student_patches_list, teacher_patches_list
             del student_cls, masks_flat
             del all_student_crops, all_student_masks

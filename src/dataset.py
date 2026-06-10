@@ -4,6 +4,7 @@ import os, glob, logging, random, math
 import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import v2
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ class NormalizeTransform(torch.nn.Module):
         # Input is in [0, 1]. Mean and std are based on dataset stats
         self.transform = v2.Compose([
             lambda x: torch.clamp(x, 0, 1),
-            v2.Normalize(mean=[0.7706402555595372], std=[0.13980507597378528])
+            v2.Normalize(mean=[0.7706402539115733], std=[0.15731125981879593])
         ])
 
     def forward(self, img):
@@ -84,9 +85,10 @@ class SonarDataset(Dataset):
     Expected input: 384x384 numpy matrices, normalized [0, 1].
     Output: (1, 384, 384) FloatTensors.
     """
-    def __init__(self, data_dir="data/processed", ext="*.npz"):
+    def __init__(self, data_dir="data/processed", ext="*.npz", tile_size=384):
         super().__init__()
 
+        self.tile_crop = v2.RandomCrop(tile_size)
         self.files = sorted(glob.glob(os.path.join(data_dir, ext)))
         if len(self.files) == 0:
             raise ValueError(f"No files found in {data_dir} with extension {ext}")
@@ -101,21 +103,20 @@ class SonarDataset(Dataset):
         data = info['data']
         distances = info['distances']
 
-        if data.ndim == 2:
-            data = data[np.newaxis, :, :]  # Add channel dim -> (1, 384, 384)
+        if np.any(distances > 1):
+            distances = distances - 1  # Starboard normalized dist from nadir
+        else:
+            distances = 1 - distances  # Port normalized dist from nadir
 
-        if distances.ndim == 2:
-            distances = distances[np.newaxis, :, :]  # Add channel dim -> (1, 384, 384)
-
-        data = torch.from_numpy(data)
+        data = torch.from_numpy(data[np.newaxis, :, :])  # Add channel dim -> (1, 384, 384)
         if torch.isnan(data).any() or torch.isinf(data).any():
             data = torch.nan_to_num(data, nan=0.0, posinf=1.0, neginf=0.0)
 
-        distances = torch.from_numpy(distances)
+        distances = torch.from_numpy(distances[np.newaxis, :, :])  # Add channel dim -> (1, 384, 384)
         if torch.isnan(distances).any() or torch.isinf(distances).any():
-            distances = torch.nan_to_num(distances, nan=0.0, posinf=2.0, neginf=0.0)
+            distances = torch.nan_to_num(distances, nan=0.0, posinf=1.0, neginf=0.0)
 
-        return data, distances
+        return self.tile_crop(data, distances)
 
 
 class SonarDataTransform:
@@ -148,11 +149,11 @@ class SonarDataTransform:
         self.augmentations = v2.Compose([
             TVGAttenuation(retention=(0.00, 0.75), p=0.3),  # TVG Attenuation to simulate propagation loss
             v2.RandomApply([v2.ColorJitter(
-                brightness=(1.00, 1.15),                    # Brightness corresponds to sonar gain (intensity)
-                contrast=(1.00, 2.00),                      # Contrast corresponds to dynamic range of reciever
+                brightness=(1.00, 1.10),                    # Brightness corresponds to sonar gain (intensity)
+                contrast=(1.00, 1.50),                      # Contrast corresponds to dynamic range of reciever
                 saturation=0, hue=0)                        # Data is only 1 channel and the concept of colors doesn't apply to sonar
             ], p=0.5),
-            GaussianNoise(sigma=(0.00, 0.30), p=0.3),       # Gaussian Noise to simulate speckle noise
+            GaussianNoise(sigma=(0.00, 0.10), p=0.3),       # Gaussian Noise to simulate speckle noise
         ])
 
         self.normalize = NormalizeTransform()
@@ -160,31 +161,31 @@ class SonarDataTransform:
     def __call__(self, data):
         teacher_crops = []
         student_crops = []
+        distance_crops = []
 
         image, distances = data
-
-        if torch.any(distances > 1):
-            distances = distances - 1  # Starboard normalized dist from nadir
-        else:
-            distances = 1 - distances  # Port normalized dist from nadir
 
         # --- Global Crops (2 views) ---
         # Used by both Teacher and Student
         for _ in range(2):
-            crop_aug = self.flips(self.global_crop(image))
+            crop_aug, crop_dist = self.flips(self.global_crop(image, distances))
             teacher_crops.append(self.normalize(crop_aug.clone()))
 
             full_aug = self.augmentations(crop_aug)
             student_crops.append(self.normalize(full_aug))
+
+            distance_crops.append(crop_dist)
 
         # --- Local Crops (8+ views) ---
         # Used by Student only to encourage local-to-global correspondence
         for _ in range(self.local_crops_number):
-            crop_aug = self.flips(self.local_crop(image))
+            crop_aug, crop_dist = self.flips(self.local_crop(image, distances))
             teacher_crops.append(self.normalize(crop_aug.clone()))
 
             full_aug = self.augmentations(crop_aug)
             student_crops.append(self.normalize(full_aug))
+
+            distance_crops.append(crop_dist)
 
         return {
             'teacher': {
@@ -195,9 +196,9 @@ class SonarDataTransform:
                 'global_crops': student_crops[:2],
                 'local_crops': student_crops[2:]
             },
-            'hsic': {
-                'data': self.normalize(image),
-                'distances': distances
+            'distances': {
+                'global_crops': distance_crops[:2],
+                'local_crops': distance_crops[2:]
             }
         }
 
@@ -205,13 +206,13 @@ class SonarDataTransform:
 class MaskingGenerator:
     def __init__(
         self,
-        input_size=(288, 288),
+        input_size=288,
         stride_size=32,
         mask_ratio=0.5,
         min_num_patches=4,     # Minimum size of a single block
         min_aspect=0.3,        # Min aspect ratio of block
     ):
-        self.height, self.width = input_size[0] // stride_size, input_size[1] // stride_size
+        self.height, self.width = input_size // stride_size, input_size // stride_size
         self.num_patches = self.height * self.width
 
         self.min_num_patches = min_num_patches

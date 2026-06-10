@@ -18,14 +18,6 @@ OUTPUT_DIR = DATA_DIR / "processed"
 NADIR_SIZE = 200              # Number of bins to exclude around the nadir (center) to avoid noise
 INPUT_SHAPE = (768, 768)      # Original shape of the sonar tiles
 OVERLAP_FACTOR = 0.75         # Factor by which to overlap the tiles (e.g. 0.75 means 75% overlap)
-DOWNSAMPLE_FACTOR = 2         # Factor by which to downsample the tiles
-
-
-def downsample(data: np.ndarray, factor: int = 2) -> np.ndarray:
-    # Use mean pooling to downsample instead of interpolation to preserve sonar characteristics
-    h, w = data.shape
-    reshaped = data.reshape(h // factor, factor, w // factor, factor)
-    return reshaped.mean(axis=(1, 3))
 
 
 def xtf_to_data(xtf_path: Path) -> np.ndarray:
@@ -75,15 +67,12 @@ def cut_tiles(xtf_path: Path, output_path: Path, prefix: str) -> Tuple[float, fl
             tile = data[row - padding[0]:row + padding[0], col - padding[1]:col + padding[1]]
             distances = np.ones_like(tile) * np.arange(col - padding[1], col + padding[1])
 
-            tile = downsample(tile, factor=DOWNSAMPLE_FACTOR)
-            distances = downsample(distances, factor=DOWNSAMPLE_FACTOR)
-
             # Normalize distances to [0, 2] (encodes port vs stbd)
             distances /= middle
 
             if tile.shape[0] != tile.shape[1]:
                 continue
-            elif tile.shape[0] != INPUT_SHAPE[0] // DOWNSAMPLE_FACTOR:
+            elif tile.shape[0] != INPUT_SHAPE[0]:
                 continue
 
             mean += np.mean(tile)

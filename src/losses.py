@@ -222,6 +222,8 @@ class HSICLoss(nn.Module):
     Computes the Hilbert-Schmidt Independence Criterion (HSIC) to measure 
     dependence between learned features and a target variable (e.g., distance).
     Minimizing this loss encourages the features to be independent of the target.
+
+    Reference: https://arxiv.org/abs/1908.01580
     """
     def __init__(self):
         super().__init__()
@@ -274,12 +276,12 @@ class HSICLoss(nn.Module):
 
 class LinearHSICLoss(nn.Module):
     """
-    Lightweight HSIC computation using a Linear Kernel.
-    Computes the squared Frobenius norm of the cross-covariance matrix.
+    Lightweight HSIC computation using squared Pearson correlation.
     Complexity: O(N * D_x * D_y) instead of O(N^2)
     """
-    def __init__(self):
+    def __init__(self, eps=1e-8):
         super().__init__()
+        self.eps = eps
 
     def forward(self, features, targets):
         """
@@ -292,17 +294,23 @@ class LinearHSICLoss(nn.Module):
         features_c = features - features.mean(dim=0, keepdim=True)
         targets_c = targets - targets.mean(dim=0, keepdim=True)
 
+        features_v = (features_c ** 2).mean(dim=0, keepdim=True)
+        targets_v = (targets_c ** 2).mean(dim=0, keepdim=True)
+
         # Compute the cross-covariance matrix C (Shape: D_f x D_t)
         C = torch.matmul(features_c.t(), targets_c) / (N - 1)
 
-        # HSIC is the squared Frobenius norm of the cross-covariance matrix
-        return torch.sum(C ** 2)
+        # Pearson correlation squared: Cov^2 / (Var(F) * Var(T))
+        # Minimize the mean squared correlation across all feature/target pairs
+        return torch.mean((C ** 2) / (features_v.t() * targets_v + self.eps))
 
 
 class RFFHSICLoss(nn.Module):
     """
     Lightweight non-linear HSIC using Random Fourier Features (RFF).
     Approximates the RBF kernel without the O(N^2) memory bottleneck.
+
+    Reference: https://arxiv.org/abs/2106.08320
     """
     def __init__(self, feature_dim, target_dim=1, num_rff=128, sigma=1.0):
         super().__init__()
