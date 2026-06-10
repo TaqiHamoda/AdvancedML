@@ -327,7 +327,7 @@ class RFFHSICLoss(nn.Module):
     def get_rff(self, x, W, b):
         # Applies the randomized feature mapping: sqrt(2/D) * cos(XW + b)
         projection = torch.matmul(x, W) + b
-        return torch.sqrt(2.0 / self.num_rff) * torch.cos(projection)
+        return ((2.0 / self.num_rff) ** 0.5) * torch.cos(projection)
 
     def forward(self, features, targets):
         N = features.size(0)

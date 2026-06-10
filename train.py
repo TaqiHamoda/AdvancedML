@@ -1,6 +1,7 @@
 import torch
 import torch.optim as optim
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -37,6 +38,7 @@ def dino_collate_fn(batch):
     output = {
         'teacher': {'global_crops': [], 'local_crops': []},
         'student': {'global_crops': [], 'local_crops': []},
+        'distances': {'global_crops': [], 'local_crops': []},
     }
 
     # Collate standard crops
@@ -77,7 +79,7 @@ class Trainer:
 
         # --- Hyperparameters ---
         self.output_dim = 8192  # Number of class tokens outputted by DINO Head
-        self.batch_size = 15  # Max possible per GPU
+        self.batch_size = 20  # Max possible per GPU
         self.effective_batch_size = 4096  # Desired batch size
         self.accum_iter = self.effective_batch_size // self.batch_size  # Number of gradient accumulation steps
         self.base_lr = 1e-3
@@ -121,7 +123,7 @@ class Trainer:
             batch_size=self.batch_size,
             shuffle=(self.sampler is None),  # Shuffle handled by sampler if DDP
             sampler=self.sampler,
-            num_workers=70,
+            num_workers=16,
             pin_memory=True,
             drop_last=True,
             collate_fn=dino_collate_fn
@@ -194,7 +196,7 @@ class Trainer:
         self.dino_loss_fn = DINOLoss(out_dim=self.output_dim).to(self.device)
         self.ibot_loss_fn = iBOTPatchLoss(out_dim=self.output_dim).to(self.device)
         self.gram_loss_fn = GramLoss().to(self.device)
-        self.hsic_loss_fn = RFFHSICLoss(feature_dim=self.output_dim).to(self.device)
+        self.hsic_loss_fn = RFFHSICLoss(feature_dim=embed_dim).to(self.device)
         self.koleo_loss_fn = KoLeoLoss().to(self.device)
 
         # --- Optimizer ---
@@ -238,6 +240,7 @@ class Trainer:
             teacher_global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['teacher']['global_crops']]
             student_global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['student']['global_crops']]
             student_local_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['student']['local_crops']]
+            distance_global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['distances']['global_crops']]
 
             B = student_global_crops[0].shape[0]
             masks_list = []
@@ -298,7 +301,22 @@ class Trainer:
                         current_teacher_temp
                     )
 
-                    loss_hsic = None  # TODO: Implement
+                    B_features, N_patches, D = s_global_patches.shape
+                    num_crops = B_features // student_global_crops[0].shape[0]
+                    dist_crops_cat = torch.cat(distance_global_crops[:num_crops], dim=0) # (B_features, 1, 288, 288)
+
+                    grid_size = int(round(N_patches ** 0.5))
+                    if grid_size * grid_size == N_patches:
+                        patch_dist = F.adaptive_avg_pool2d(dist_crops_cat, (grid_size, grid_size))
+                    else:
+                        patch_dist = F.adaptive_avg_pool2d(dist_crops_cat, (N_patches, 1))
+
+                    patch_dist_flat = patch_dist.view(B_features, -1, 1) # (B_features, N_patches, 1)
+
+                    loss_hsic = self.hsic_loss_fn(
+                        s_global_patches.view(-1, D), 
+                        patch_dist_flat.view(-1, 1).to(s_global_patches.dtype)
+                    )
 
                     student_cls_chunked = student_cls.chunk(len(all_student_crops))
                     loss_koleo = self.koleo_loss_fn(student_cls_chunked[0])  # Pass ONLY the first global crop (unique independent images)
@@ -319,7 +337,8 @@ class Trainer:
                 self.scaler.scale(loss).backward()
 
             # Manually delete heavy tensors to free VRAM for the next iteration
-            del loss, loss_ibot, loss_gram, loss_koleo
+            # del loss, loss_ibot, loss_gram, loss_koleo
+            del loss, loss_ibot, loss_koleo
             del student_output, teacher_output
             del s_ibot_out, t_ibot_out
             del teacher_global_crops, student_global_crops, student_local_crops, masks

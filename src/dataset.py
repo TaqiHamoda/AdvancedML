@@ -4,7 +4,6 @@ import os, glob, logging, random, math
 import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import v2
-import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
