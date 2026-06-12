@@ -329,7 +329,7 @@ class Trainer:
                 # Log only on Master
                 if self.rank == 0 and i % self.accum_iter == 0:
                     logger.info(f"Epoch {epoch_index:03d} [{i:04d}/{len(self.loader)}] "
-                        f"lr: {current_lr:.6f}, temp: {self.teacher_temp_schedule[it]:.4f}, m: {self.momentum_schedule[it]:.4f}, "
+                        f"lr: {current_lr:.6f}, t: {self.teacher_temp_schedule[it]:.4f}, m: {self.momentum_schedule[it]:.4f}, "
                         f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, HSIC: {loss_hsic.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
                         # f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
 

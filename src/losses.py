@@ -223,7 +223,7 @@ class HSICLoss(nn.Module):
     dependence between learned features and a target variable (e.g., distance).
     Minimizing this loss encourages the features to be independent of the target.
 
-    Reference: https://arxiv.org/abs/1908.01580
+    Reference: https://arxiv.org/abs/2106.08320
     """
     def __init__(self):
         super().__init__()
