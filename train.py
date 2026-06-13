@@ -14,7 +14,7 @@ import os, time
 
 # Import your modules
 from src.dataset import MaskingGenerator, SonarDataset, SonarDataTransform
-from dino import ConvNeXtV2, DINOHead, MultiCropWrapper
+from src.dino import ConvNeXtV2, DINOHead, MultiCropWrapper
 from src.losses import DINOLoss, iBOTPatchLoss, GramLoss, KoLeoLoss, HSICLoss, LinearHSICLoss, RFFHSICLoss
 
 logger = logging.getLogger(__name__)
@@ -92,7 +92,7 @@ class Trainer:
 
         self.teacher_temp_start = 0.04
         self.teacher_temp_end = 0.07
-        self.momentum_teacher_start = 0.996
+        self.momentum_teacher_start = 0.994
         self.momentum_teacher_end = 1.0
 
         self.w_dino = 1.0

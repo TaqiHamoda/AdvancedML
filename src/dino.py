@@ -184,7 +184,7 @@ class ConvNeXtV2Decoder(nn.Module):
 
 
 class ConvNeXtV2(nn.Module):
-    def __init__(self, in_chans=1, drop_path_rate=0.0, layer_scale_init_value=1e-6, decoder_dim=512, arch="tiny"):
+    def __init__(self, in_chans=1, drop_path_rate=0.0, decoder_dim=512, arch="tiny"):
         super().__init__()
 
         if arch == "tiny":
@@ -212,7 +212,7 @@ class ConvNeXtV2(nn.Module):
         cur = 0
         for i in range(4):
             stage_blocks = nn.ModuleList([
-                SparseBlock(dim=dims[i], drop_path=dp_rates[cur + j], layer_scale_init_value=layer_scale_init_value) 
+                SparseBlock(dim=dims[i], drop_path=dp_rates[cur + j]) 
                 for j in range(depths[i])
             ])
             self.stages.append(stage_blocks)
