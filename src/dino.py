@@ -290,6 +290,37 @@ class ConvNeXtV2(nn.Module):
             if hasattr(m, 'bias') and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
+    def inference(self, x, mask=None):
+        """
+        Runs the forward pass and returns the dense feature maps 
+        from all 4 stages.
+        """
+        if mask is not None:
+            current_mask = F.interpolate(mask.unsqueeze(1).float(), size=x.shape[-2:], mode='nearest').squeeze(1).bool()
+        else:
+            current_mask = torch.ones(x.shape[0], x.shape[2], x.shape[3], device=x.device, dtype=torch.bool)
+
+        x_sparse = dense_to_sparse(x, current_mask)
+
+        outputs = []
+        for i in range(4):
+            # Pass through the downsample layer and the blocks of the current stage
+            x_sparse = self.downsample_layers[i](x_sparse)
+            for block in self.stages[i]:
+                x_sparse = block(x_sparse)
+
+            # Convert back to dense for the intermediate output
+            stage_out = x_sparse.dense()
+
+            # Clean up bias leakage in empty space if a mask is provided
+            if mask is not None:
+                mask_x = F.interpolate(mask.unsqueeze(1).float(), size=stage_out.shape[-2:], mode='nearest')
+                stage_out = stage_out * mask_x
+
+            outputs.append(stage_out)
+
+        return outputs
+
     def forward(self, x, mask=None):
         if mask is not None:
             current_mask = F.interpolate(mask.unsqueeze(1).float(), size=x.shape[-2:], mode='nearest').squeeze(1).bool()

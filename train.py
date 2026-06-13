@@ -81,7 +81,7 @@ class Trainer:
         # --- Hyperparameters ---
         self.output_dim = 4096  # Number of prototypes outputted by DINO
         self.batch_size = 30  # Max possible per GPU
-        self.effective_batch_size = 4096  # Desired batch size
+        self.effective_batch_size = 8192 // self.world_size  # Desired batch size per GPU
         self.accum_iter = self.effective_batch_size // self.batch_size  # Number of gradient accumulation steps
         self.base_lr = 5e-4 * (self.world_size * self.effective_batch_size / 1024) ** 0.5  # Square root scaling
         self.weight_decay = 0.04

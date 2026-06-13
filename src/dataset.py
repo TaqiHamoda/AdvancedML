@@ -146,13 +146,13 @@ class SonarDataTransform:
         # If you want to make the image or objects unclear, increase the noise instead to remain
         # accurate to the physics. (Interference is a more accurate way to model "blur" or loss of clarity)
         self.augmentations = v2.Compose([
-            TVGAttenuation(retention=(0.00, 0.75), p=0.3),  # TVG Attenuation to simulate propagation loss
+            TVGAttenuation(retention=(0.00, 1.00), p=0.3),  # TVG Attenuation to simulate propagation loss
             v2.RandomApply([v2.ColorJitter(
-                brightness=(1.00, 1.10),                    # Brightness corresponds to sonar gain (intensity)
-                contrast=(1.00, 1.50),                      # Contrast corresponds to dynamic range of reciever
+                brightness=(1.00, 1.20),                    # Brightness corresponds to sonar gain (intensity)
+                contrast=(1.00, 3.00),                      # Contrast corresponds to dynamic range of reciever
                 saturation=0, hue=0)                        # Data is only 1 channel and the concept of colors doesn't apply to sonar
             ], p=0.5),
-            GaussianNoise(sigma=(0.00, 0.10), p=0.3),       # Gaussian Noise to simulate speckle noise
+            GaussianNoise(sigma=(0.00, 0.30), p=0.3),       # Gaussian Noise to simulate speckle noise
         ])
 
         self.normalize = NormalizeTransform()
