@@ -33,6 +33,20 @@ class LayerNorm(nn.Module):
             return x
 
 
+class SparseDownsample(nn.Module):
+    def __init__(self, in_chans, out_chans, kernel_size, stride):
+        super().__init__()
+        self.norm = nn.LayerNorm(in_chans, eps=1e-6)
+        self.conv = spconv.SparseConv2d(
+            in_chans, out_chans, kernel_size=kernel_size, stride=stride, algo=spconv.ConvAlgo.Native
+        )
+
+    def forward(self, x: spconv.SparseConvTensor):
+        # Apply norm to the flat active features (N, C)
+        x = x.replace_feature(self.norm(x.features))
+        return self.conv(x)
+
+
 class SparseGRN(nn.Module):
     """Global Response Normalization computed natively on sparse spconv features."""
     def __init__(self, dim, eps=1e-6):
@@ -105,15 +119,51 @@ class DropPath(nn.Module):
         return x.div(keep_prob) * random_tensor
 
 
+class SparseDepthwiseBypass(nn.Module):
+    """
+    Bypasses spconv's lack of depthwise support by utilizing PyTorch's native 
+    highly-optimized dense depthwise convolutions, while perfectly preserving 
+    the sparse Submanifold mathematical properties.
+    """
+    def __init__(self, dim, kernel_size=7):
+        super().__init__()
+        self.dwconv = nn.Conv2d(
+            dim, dim, 
+            kernel_size=kernel_size, 
+            padding=kernel_size // 2, 
+            groups=dim, 
+            bias=True
+        )
+        
+    def forward(self, x: spconv.SparseConvTensor):
+        dense_x = x.dense()
+
+        out = self.dwconv(dense_x)
+
+        # x.indices is an (N, 3) tensor: [batch_idx, h_idx, w_idx]
+        batch_idx = x.indices[:, 0].long()
+        h_idx = x.indices[:, 1].long()
+        w_idx = x.indices[:, 2].long()
+
+        # Permute to (B, H, W, C) so we can efficiently index the active points
+        out_hwc = out.permute(0, 2, 3, 1)
+        active_features = out_hwc[batch_idx, h_idx, w_idx]
+
+        # By only extracting active coordinates, we completely discard any kernel "bleed" 
+        # into the empty space, strictly enforcing the Submanifold property.
+        return x.replace_feature(active_features)
+
+
 class SparseBlock(nn.Module):
     """Fully Sparse block for the Encoder."""
     def __init__(self, dim, drop_path=0.0, layer_scale_init_value=1e-6):
         super().__init__()
-        # 1. Sparse Depthwise Convolution
-        self.dwconv = spconv.SubMConv2d(
-            in_channels=dim, out_channels=dim, kernel_size=7, padding=3, 
-            groups=1, bias=True, algo=spconv.ConvAlgo.Native
-        )
+        # Sparse Depthwise Convolution
+        # self.dwconv = spconv.SubMConv2d(
+        #     in_channels=dim, out_channels=dim, kernel_size=7, padding=3, 
+        #     groups=dim, bias=True, algo=spconv.ConvAlgo.Native
+        # )
+        self.dwconv = SparseDepthwiseBypass(dim=dim, kernel_size=7)
 
         self.norm = nn.LayerNorm(dim, eps=1e-6) 
         self.pwconv1 = nn.Linear(dim, 4 * dim)
@@ -209,16 +259,10 @@ class ConvNeXtV2(nn.Module):
         depths = [3, 3, 9, 3]
         dims = [96, 192, 384, 768]
 
-        self.downsample_layers = nn.ModuleList() 
-        self.downsample_layers.append(nn.Sequential(
-            nn.Conv2d(in_chans, dims[0], kernel_size=4, stride=4),
-            LayerNorm(dims[0], eps=1e-6, data_format="channels_first")
-        ))
+        self.downsample_layers = nn.ModuleList()
+        self.downsample_layers.append(SparseDownsample(in_chans, dims[0], kernel_size=4, stride=4))
         for i in range(3):
-            self.downsample_layers.append(nn.Sequential(
-                LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
-                nn.Conv2d(dims[i], dims[i+1], kernel_size=2, stride=2),
-            ))
+            self.downsample_layers.append(SparseDownsample(dims[i], dims[i+1], kernel_size=2, stride=2))
 
         self.stages = nn.ModuleList()
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
@@ -247,20 +291,19 @@ class ConvNeXtV2(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x, mask=None):
+        if mask is not None:
+            current_mask = F.interpolate(mask.unsqueeze(1).float(), size=x.shape[-2:], mode='nearest').squeeze(1).bool()
+        else:
+            current_mask = torch.ones(x.shape[0], x.shape[2], x.shape[3], device=x.device, dtype=torch.bool)
+        
+        x_sparse = dense_to_sparse(x, current_mask)
+
         for i in range(4):
-            x = self.downsample_layers[i](x)
-
-            if mask is not None:
-                current_mask = F.interpolate(mask.unsqueeze(1).float(), size=x.shape[-2:], mode='nearest').squeeze(1).bool()
-                x_sparse = dense_to_sparse(x, current_mask)
-            else:
-                current_mask = torch.ones(x.shape[0], x.shape[2], x.shape[3], device=x.device, dtype=torch.bool)
-                x_sparse = dense_to_sparse(x, current_mask)
-
+            x_sparse = self.downsample_layers[i](x_sparse)
             for block in self.stages[i]:
                 x_sparse = block(x_sparse)
 
-            x = x_sparse.dense()
+        x = x_sparse.dense()
 
         # Global CLS Branch
         if mask is not None:

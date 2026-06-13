@@ -74,23 +74,25 @@ class Trainer:
         # Data Parameters
         self.stride_size = 32
         self.tile_size = 384
-        self.global_crop_size = 288
+        self.global_crop_size = 224
         self.local_crop_size = 96
+        self.local_crops_number = 8
 
         # --- Hyperparameters ---
-        self.output_dim = 8192  # Number of class tokens outputted by DINO Head
-        self.batch_size = 20  # Max possible per GPU
+        self.output_dim = 4096  # Number of prototypes outputted by DINO
+        self.batch_size = 30  # Max possible per GPU
         self.effective_batch_size = 4096  # Desired batch size
         self.accum_iter = self.effective_batch_size // self.batch_size  # Number of gradient accumulation steps
-        self.base_lr = 1e-3
-        self.min_lr = 1e-3
+        self.base_lr = 5e-4 * (self.world_size * self.effective_batch_size / 1024) ** 0.5  # Square root scaling
         self.weight_decay = 0.04
         self.epochs = 100
         self.warmup_epochs = self.epochs // 10
 
+        self.center_momentum = 1.0 - (1.0 - 0.996) / self.accum_iter  # Scale with the gradient accumulation steps
+
         self.teacher_temp_start = 0.04
         self.teacher_temp_end = 0.07
-        self.momentum_teacher_start = 0.994
+        self.momentum_teacher_start = 0.996
         self.momentum_teacher_end = 1.0
 
         self.w_dino = 1.0
@@ -102,7 +104,7 @@ class Trainer:
         # --- Masking, Data & Sampler ---
         self.mask_generator = MaskingGenerator(input_size=self.global_crop_size, stride_size=self.stride_size, mask_ratio=0.5)
         dataset = SonarDataset(tile_size=self.tile_size)
-        transform = SonarDataTransform(local_crops_number=8, global_crops_size=self.global_crop_size, local_crops_size=self.local_crop_size)
+        transform = SonarDataTransform(local_crops_number=self.local_crops_number, global_crops_size=self.global_crop_size, local_crops_size=self.local_crop_size)
         
         # Wrapper class to apply transform on the fly
         class TransformedDataset(torch.utils.data.Dataset):
@@ -143,7 +145,7 @@ class Trainer:
 
         self.lr_schedule = cosine_scheduler(
             base_value=self.base_lr,
-            final_value=self.min_lr,
+            final_value=self.base_lr,
             epochs=self.epochs,
             niter_per_ep=self.effective_niter_per_ep,
             warmup_epochs=self.warmup_epochs,
@@ -193,8 +195,8 @@ class Trainer:
             self.student_ibot_head = DDP(self.student_ibot_head, device_ids=[self.local_rank])
 
         # --- Losses ---
-        self.dino_loss_fn = DINOLoss(out_dim=self.output_dim).to(self.device)
-        self.ibot_loss_fn = iBOTPatchLoss(out_dim=self.output_dim).to(self.device)
+        self.dino_loss_fn = DINOLoss(out_dim=self.output_dim, center_momentum=self.center_momentum).to(self.device)
+        self.ibot_loss_fn = iBOTPatchLoss(out_dim=self.output_dim, center_momentum=self.center_momentum).to(self.device)
         self.gram_loss_fn = GramLoss().to(self.device)
         self.hsic_loss_fn = RFFHSICLoss(feature_dim=embed_dim).to(self.device)
         self.koleo_loss_fn = KoLeoLoss().to(self.device)

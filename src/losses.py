@@ -4,59 +4,6 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 
-class SinkhornKnopp(nn.Module):
-    """
-    DINOv2/3-style Loss: SinkhornKnopp + Softmax. 
-    Better for large batch sizes (B >> K).
-    """
-    def __init__(self, out_dim, student_temp=0.1, n_iterations=3, eps=1e-6):
-        super().__init__()
-        self.out_dim = out_dim
-        self.student_temp = student_temp
-        self.n_iterations = n_iterations
-        self.eps = eps
-
-    @torch.no_grad()
-    def get_probs(self, student_output, teacher_output, teacher_temp):
-        # Cast to float32 to prevent overflow
-        student_output = student_output.float()
-        teacher_output = teacher_output.float()
-
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
-
-        # Max normalization for stability
-        log_Q = (teacher_output / teacher_temp).t()  # (K, B*world_size)
-        log_Q = log_Q - log_Q.max(dim=0, keepdim=True)[0]
-
-        Q = torch.exp(log_Q)
-        B = Q.shape[1] * world_size 
-        K = Q.shape[0] 
-
-        sum_Q = torch.sum(Q)
-        if dist.is_initialized():
-            dist.all_reduce(sum_Q)
-        Q /= sum_Q + self.eps
-
-        for _ in range(self.n_iterations):
-            row_sum = torch.sum(Q, dim=1, keepdim=True)
-            if dist.is_initialized():
-                dist.all_reduce(row_sum)
-            Q /= row_sum + self.eps
-            Q /= K
-
-            col_sum = torch.sum(Q, dim=0, keepdim=True)
-            Q /= col_sum + self.eps
-            Q /= B
-
-        Q *= B
-        t_probs = Q.t()
-
-        # Student Log-Softmax
-        s_out = student_output / self.student_temp
-        s_log_probs = F.log_softmax(s_out, dim=-1)
-
-        return s_log_probs, t_probs
-
 class Centering(nn.Module):
     """
     DINOv1-style Loss: Centering + Softmax. 
@@ -107,7 +54,63 @@ class Centering(nn.Module):
         return s_log_probs, t_probs
 
 
-class DINOLoss(Centering):
+class SinkhornKnopp(nn.Module):
+    """
+    DINOv2/3-style Loss: SinkhornKnopp + Softmax. 
+    Better for large batch sizes (B >> K).
+    """
+
+    # center_momentum is only put there as a placeholder for easy switching with Centering
+    def __init__(self, out_dim, student_temp=0.1, center_momentum=0.996, n_iterations=3, eps=1e-6):
+        super().__init__()
+        self.out_dim = out_dim
+        self.student_temp = student_temp
+        self.n_iterations = n_iterations
+        self.eps = eps
+
+    @torch.no_grad()
+    def get_probs(self, student_output, teacher_output, teacher_temp):
+        # Cast to float32 to prevent overflow
+        student_output = student_output.float()
+        teacher_output = teacher_output.float()
+
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+
+        # Max normalization for stability
+        log_Q = (teacher_output / teacher_temp).t()  # (K, B*world_size)
+        log_Q = log_Q - log_Q.max(dim=0, keepdim=True)[0]
+
+        Q = torch.exp(log_Q)
+        B = Q.shape[1] * world_size 
+        K = Q.shape[0] 
+
+        sum_Q = torch.sum(Q)
+        if dist.is_initialized():
+            dist.all_reduce(sum_Q)
+        Q /= sum_Q + self.eps
+
+        for _ in range(self.n_iterations):
+            row_sum = torch.sum(Q, dim=1, keepdim=True)
+            if dist.is_initialized():
+                dist.all_reduce(row_sum)
+            Q /= row_sum + self.eps
+            Q /= K
+
+            col_sum = torch.sum(Q, dim=0, keepdim=True)
+            Q /= col_sum + self.eps
+            Q /= B
+
+        Q *= B
+        t_probs = Q.t()
+
+        # Student Log-Softmax
+        s_out = student_output / self.student_temp
+        s_log_probs = F.log_softmax(s_out, dim=-1)
+
+        return s_log_probs, t_probs
+
+
+class DINOLoss(SinkhornKnopp):
     def forward(self, student_output, teacher_output, teacher_temp):
         """
         Args:
@@ -138,7 +141,7 @@ class DINOLoss(Centering):
         return total_loss / normalization
 
 
-class iBOTPatchLoss(Centering):
+class iBOTPatchLoss(SinkhornKnopp):
     def forward(self, student_patches, teacher_patches, masks, teacher_temp):
         s_log_probs, t_probs = self.get_probs(student_patches, teacher_patches, teacher_temp)
 
