@@ -14,7 +14,7 @@ import os, time
 
 # Import your modules
 from src.dataset import MaskingGenerator, SonarDataset, SonarDataTransform
-from src.dino import ConvNeXtV2, DINOHead, MultiCropWrapper
+from dino import ConvNeXtV2, DINOHead, MultiCropWrapper
 from src.losses import DINOLoss, iBOTPatchLoss, GramLoss, KoLeoLoss, HSICLoss, LinearHSICLoss, RFFHSICLoss
 
 logger = logging.getLogger(__name__)
@@ -257,7 +257,7 @@ class Trainer:
             mask_grid_w = student_global_crops[0].shape[-1] // self.stride_size
 
             masks_spatial = masks.view(-1, mask_grid_h, mask_grid_w)
-            active_masks = ~masks_spatial 
+            active_masks = ~masks_spatial
 
             # Split the active mask into two chunks for the two global crops
             active_masks_chunked = list(torch.chunk(active_masks, 2, dim=0))

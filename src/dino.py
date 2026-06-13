@@ -107,7 +107,7 @@ class SparseDepthwiseBypass(nn.Module):
 
 class SparseBlock(nn.Module):
     """Fully Sparse block."""
-    def __init__(self, dim, drop_path=0.0, layer_scale_init_value=1e-6):
+    def __init__(self, dim, drop_path=0.0):
         super().__init__()
         self.dwconv = SparseDepthwiseBypass(dim=dim, kernel_size=7)
 
@@ -116,11 +116,6 @@ class SparseBlock(nn.Module):
         self.act = nn.GELU()
         self.grn = SparseGRN(4 * dim)
         self.pwconv2 = nn.Linear(4 * dim, dim)
-
-        if layer_scale_init_value > 0:
-            self.gamma = nn.Parameter(layer_scale_init_value * torch.ones(dim), requires_grad=True)
-        else:
-            self.gamma = nn.Parameter(torch.ones(dim), requires_grad=True)
 
         if drop_path > 0.:
             self.drop_path = SparseDropPath(drop_path)
@@ -140,10 +135,25 @@ class SparseBlock(nn.Module):
         features = self.act(features)
         features = self.grn(features, indices, batch_size)
         features = self.pwconv2(features)
-        features = self.gamma * features
         features = self.drop_path(features, indices, batch_size)
 
         return x_sp.replace_feature(shortcut_features + features)
+
+
+class DenseStem(nn.Module):
+    def __init__(self, in_chans, out_chans, kernel_size=4, stride=4):
+        super().__init__()
+        self.conv = nn.Conv2d(in_chans, out_chans, kernel_size=kernel_size, stride=stride)
+        self.norm = nn.LayerNorm(out_chans, eps=1e-6)
+
+    def forward(self, x):
+        x = self.conv(x)
+        # Permute to (B, H, W, C) for standard LayerNorm
+        x = x.permute(0, 2, 3, 1)
+        x = self.norm(x)
+        # Permute back to (B, C, H, W)
+        x = x.permute(0, 3, 1, 2)
+        return x
 
 
 class ConvNeXtV2Decoder(nn.Module):
@@ -193,7 +203,7 @@ class ConvNeXtV2(nn.Module):
             raise ValueError(f"Configuration {arch} doesn't exist. Please use one of the supported configurations: tiny, base, large, huge.")
 
         self.downsample_layers = nn.ModuleList()
-        self.downsample_layers.append(SparseDownsample(in_chans, dims[0], kernel_size=4, stride=4))
+        self.downsample_layers.append(DenseStem(in_chans, dims[0], kernel_size=4, stride=4))
         for i in range(3):
             self.downsample_layers.append(SparseDownsample(dims[i], dims[i+1], kernel_size=2, stride=2))
 
@@ -223,20 +233,29 @@ class ConvNeXtV2(nn.Module):
             if hasattr(m, 'bias') and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
-    def inference(self, x, mask=None):
+    def _inference(self, x, mask=None):
         """
         Runs the forward pass and returns the dense feature maps 
         from all 4 stages.
         """
+        x = self.downsample_layers[0](x)
+
         if mask is not None:
-            current_mask = F.interpolate(mask.unsqueeze(1).float(), size=x.shape[-2:], mode='nearest').squeeze(1).bool()
+            # Upsample mask precisely to match the spatial dimensions of the stem output.
+            scale_factor = x.shape[-1] // mask.shape[-1]
+            current_mask = mask.repeat_interleave(scale_factor, dim=1).repeat_interleave(scale_factor, dim=2)
+
+            mask_expanded = current_mask.unsqueeze(1)
+            x = x * mask_expanded
         else:
             current_mask = torch.ones(x.shape[0], x.shape[2], x.shape[3], device=x.device, dtype=torch.bool)
 
         x_sparse = dense_to_sparse(x, current_mask)
+        for block in self.stages[0]:
+            x_sparse = block(x_sparse)
 
-        outputs = []
-        for i in range(4):
+        outputs = [x_sparse.dense()]
+        for i in range(1, 4):
             # Pass through the downsample layer and the blocks of the current stage
             x_sparse = self.downsample_layers[i](x_sparse)
             for block in self.stages[i]:
@@ -244,47 +263,32 @@ class ConvNeXtV2(nn.Module):
 
             # Convert back to dense for the intermediate output
             stage_out = x_sparse.dense()
-
-            # Clean up bias leakage in empty space if a mask is provided
-            if mask is not None:
-                mask_x = F.interpolate(mask.unsqueeze(1).float(), size=stage_out.shape[-2:], mode='nearest')
-                stage_out = stage_out * mask_x
-
             outputs.append(stage_out)
 
-        return outputs
+            if i != 3:
+                continue
+
+            if mask is not None:
+                scale_h = stage_out.shape[-2] // mask.shape[-2]
+                scale_w = stage_out.shape[-1] // mask.shape[-1]
+                mask_x = mask.repeat_interleave(scale_h, dim=1).repeat_interleave(scale_w, dim=2)
+
+                stage_out_masked = stage_out * mask_x.unsqueeze(1)
+                active_count = mask_x.sum(dim=(-1, -2)).unsqueeze(-1) + 1e-6
+
+                x_cls = stage_out_masked.sum([-2, -1]) / active_count
+            else:
+                x_cls = stage_out.mean([-2, -1])
+
+
+        return outputs, x_cls
 
     def forward(self, x, mask=None):
-        if mask is not None:
-            current_mask = F.interpolate(mask.unsqueeze(1).float(), size=x.shape[-2:], mode='nearest').squeeze(1).bool()
-        else:
-            current_mask = torch.ones(x.shape[0], x.shape[2], x.shape[3], device=x.device, dtype=torch.bool)
-        
-        x_sparse = dense_to_sparse(x, current_mask)
+        outputs = self._inference(x, mask)
 
-        for i in range(4):
-            x_sparse = self.downsample_layers[i](x_sparse)
-            for block in self.stages[i]:
-                x_sparse = block(x_sparse)
-
-        x = x_sparse.dense()
-
-        # Global CLS Branch
-        if mask is not None:
-            # Clean up bias leakage in empty space before Global Pooling
-            mask_x = F.interpolate(mask.unsqueeze(1).float(), size=x.shape[-2:], mode='nearest')
-            x = x * mask_x
-
-            # current_mask is True for active tokens. We count them to get the denominator.
-            active_count = current_mask.sum(dim=(-1, -2)).unsqueeze(-1) + 1e-6
-            # Sum over spatial dims and divide by valid tokens
-            x_cls = x.sum([-2, -1]) / active_count
-        else:
-            x_cls = x.mean([-2, -1])
+        x, x_cls = outputs[0][-1], outputs[1]
 
         x_cls = self.norm_cls(x_cls)
-
-        # Apply standard LayerNorm over spatial dims via inline permutations
         x_patch_spatial = self.norm_patch(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2) 
 
         # Conditional Decoding
