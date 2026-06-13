@@ -83,7 +83,7 @@ class Trainer:
         self.batch_size = 30  # Max possible per GPU
         self.effective_batch_size = 8192 // self.world_size  # Desired batch size per GPU
         self.accum_iter = self.effective_batch_size // self.batch_size  # Number of gradient accumulation steps
-        self.base_lr = 5e-4 * (self.world_size * self.effective_batch_size / 1024) ** 0.5  # Square root scaling
+        self.base_lr = 5e-5 * (self.world_size * self.effective_batch_size / 1024) ** 0.5  # Square root scaling
         self.weight_decay = 0.04
         self.epochs = 100
         self.warmup_epochs = self.epochs // 10
