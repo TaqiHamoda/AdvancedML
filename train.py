@@ -391,6 +391,9 @@ class Trainer:
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.scaler.load_state_dict(checkpoint['scaler'])
 
+        self.dino_loss_fn.load_state_dict(checkpoint['dino_loss'])
+        self.ibot_loss_fn.load_state_dict(checkpoint['ibot_loss'])
+
         epoch = checkpoint['epoch']
 
         # Free memory
@@ -428,6 +431,8 @@ class Trainer:
                     'teacher_ibot_head': self.teacher_ibot_head.state_dict(),
                     'optimizer': self.optimizer.state_dict(),
                     'scaler': self.scaler.state_dict(),
+                    'dino_loss': self.dino_loss_fn.state_dict(),
+                    'ibot_loss': self.ibot_loss_fn.state_dict()
                 }
                 torch.save(save_dict, f"weights/checkpoint_{epoch}.pth")
                 torch.save(save_dict, f"weights/checkpoint_latest.pth")

@@ -365,7 +365,7 @@ class MultiCropWrapper(nn.Module):
         start_idx = 0
         n_crops = len(x)
         current_res = x[0].shape[-1]
-        
+
         # If no masks are passed, create a list of Nones
         if masks is None:
             masks = [None] * n_crops
@@ -374,7 +374,7 @@ class MultiCropWrapper(nn.Module):
             if i == n_crops or x[i].shape[-1] != current_res:
                 end_idx = i
                 block_input = torch.cat(x[start_idx:end_idx])
-                
+
                 # Check if this crop block has masks
                 block_masks = masks[start_idx:end_idx]
                 if all(m is None for m in block_masks):
