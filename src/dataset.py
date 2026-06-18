@@ -124,10 +124,12 @@ class SonarDataTransform:
     """
     def __init__(
         self,
+        global_crops_number=2,
         local_crops_number=8,
         global_crops_size=288,
         local_crops_size=96,
     ):
+        self.global_crops_number = global_crops_number
         self.local_crops_number = local_crops_number
 
         self.flips = v2.Compose([
@@ -164,7 +166,7 @@ class SonarDataTransform:
 
         # --- Global Crops (2 views) ---
         # Used by both Teacher and Student
-        for _ in range(2):
+        for _ in range(self.global_crops_number):
             crop_aug, crop_dist = self.flips(self.global_crop(image, distances))
             teacher_crops.append(self.normalize(crop_aug.clone()))
 
@@ -198,6 +200,45 @@ class SonarDataTransform:
                 'local_crops': distance_crops[2:]
             }
         }
+
+
+class TransformedDataset(torch.utils.data.Dataset):
+    def __init__(self,
+        data_dir="data/processed", ext="*.npz",
+        global_crops_number=2,
+        local_crops_number=8,
+        global_crops_size=288,
+        local_crops_size=96,
+    ):
+        self.ds = SonarDataset(data_dir=data_dir, ext=ext)
+        self.tf = SonarDataTransform(
+            global_crops_number=global_crops_number,
+            local_crops_number=local_crops_number,
+            global_crops_size=global_crops_size,
+            local_crops_size=local_crops_size
+        )
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        return self.tf(self.ds[idx])
+
+    @staticmethod
+    def collate_fn(batch):
+        output = {
+            'teacher': {'global_crops': [], 'local_crops': []},
+            'student': {'global_crops': [], 'local_crops': []},
+            'distances': {'global_crops': [], 'local_crops': []},
+        }
+
+        # Collate standard crops
+        for model in output.keys():
+            for crop in output[model].keys():
+                for i in range(len(batch[0][model][crop])):
+                    output[model][crop].append(torch.stack([item[model][crop][i] for item in batch]))
+
+        return output
 
 
 class MaskingGenerator:

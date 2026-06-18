@@ -302,6 +302,40 @@ class ConvNeXtV2(nn.Module):
         return x_cls, x_patch_flat
 
 
+class ReconstructionHead(nn.Module):
+    """
+    A minimalist reconstruction head for masked image modeling pre-training.
+    It maps the flattened patch representations back to pixel space using a 
+    single strided ConvTranspose2d operation, keeping the heavy lifting in the backbone.
+    """
+    def __init__(self, embed_dim, patch_size=32, in_chans=1):
+        super().__init__()
+        self.head = nn.ConvTranspose2d(
+            in_channels=embed_dim, 
+            out_channels=in_chans, 
+            kernel_size=patch_size, 
+            stride=patch_size
+        )
+
+    def forward(self, x_patch_flat, h_grid=None, w_grid=None):
+        """
+        x_patch_flat: (B, N, C) - Flattened patch features from ConvNeXtV2
+        """
+        B, N, C = x_patch_flat.shape
+        
+        # If grid dimensions aren't explicitly provided, assume a square image crop
+        if h_grid is None or w_grid is None:
+            h_grid = w_grid = int(N ** 0.5)
+            
+        # 1. Unflatten: (B, N, C) -> (B, C, N) -> (B, C, h_grid, w_grid)
+        x_spatial = x_patch_flat.transpose(1, 2).view(B, C, h_grid, w_grid)
+        
+        # 2. Upsample to pixels: (B, C, h_grid, w_grid) -> (B, in_chans, h_grid*32, w_grid*32)
+        reconstructed_pixels = self.head(x_spatial)
+        
+        return reconstructed_pixels
+
+
 class DINOHead(nn.Module):
     def __init__(self, in_dim, out_dim, use_bn=False, norm_last_layer=True, nlayers=3, hidden_dim=2048, bottleneck_dim=256):
         super().__init__()

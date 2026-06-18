@@ -13,7 +13,7 @@ from tqdm import tqdm
 import os, time
 
 # Import your modules
-from src.dataset import MaskingGenerator, SonarDataset, SonarDataTransform
+from src.dataset import MaskingGenerator, TransformedDataset
 from src.dino import ConvNeXtV2, DINOHead, MultiCropWrapper
 from src.losses import DINOLoss, iBOTPatchLoss, GramLoss, KoLeoLoss, HSICLoss, LinearHSICLoss, RFFHSICLoss
 
@@ -32,22 +32,6 @@ def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epoch
     schedule = np.concatenate((warmup_schedule, schedule))
     assert len(schedule) == epochs * niter_per_ep
     return schedule
-
-
-def dino_collate_fn(batch):
-    output = {
-        'teacher': {'global_crops': [], 'local_crops': []},
-        'student': {'global_crops': [], 'local_crops': []},
-        'distances': {'global_crops': [], 'local_crops': []},
-    }
-
-    # Collate standard crops
-    for model in output.keys():
-        for crop in output[model].keys():
-            for i in range(len(batch[0][model][crop])):
-                output[model][crop].append(torch.stack([item[model][crop][i] for item in batch]))
-
-    return output
 
 
 class Trainer:
@@ -73,8 +57,9 @@ class Trainer:
 
         # Data Parameters
         self.stride_size = 32
-        self.global_crop_size = 224
-        self.local_crop_size = 96
+        self.global_crops_size = 224
+        self.local_crops_size = 96
+        self.global_crops_number = 2
         self.local_crops_number = 8
 
         # --- Hyperparameters ---
@@ -101,17 +86,13 @@ class Trainer:
         self.w_koleo = 0.1
 
         # --- Masking, Data & Sampler ---
-        self.mask_generator = MaskingGenerator(input_size=self.global_crop_size, stride_size=self.stride_size, mask_ratio=0.5)
-        dataset = SonarDataset()
-        transform = SonarDataTransform(local_crops_number=self.local_crops_number, global_crops_size=self.global_crop_size, local_crops_size=self.local_crop_size)
-        
-        # Wrapper class to apply transform on the fly
-        class TransformedDataset(torch.utils.data.Dataset):
-            def __init__(self, ds, tf): self.ds = ds; self.tf = tf
-            def __len__(self): return len(self.ds)
-            def __getitem__(self, idx): return self.tf(self.ds[idx])
-
-        self.dataset = TransformedDataset(dataset, transform)
+        self.mask_generator = MaskingGenerator(input_size=self.global_crops_size, stride_size=self.stride_size, mask_ratio=0.5)
+        self.dataset = TransformedDataset(
+            global_crops_number=self.global_crops_number,
+            local_crops_number=self.local_crops_number,
+            global_crops_size=self.global_crops_size,
+            local_crops_size=self.local_crops_size
+        )
 
         # DISTRIBUTED SAMPLER
         if self.is_distributed:
@@ -127,7 +108,7 @@ class Trainer:
             num_workers=16,
             pin_memory=True,
             drop_last=True,
-            collate_fn=dino_collate_fn
+            collate_fn=TransformedDataset.collate_fn
         )
 
         # --- Schedulers ---
