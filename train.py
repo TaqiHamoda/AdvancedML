@@ -73,7 +73,6 @@ class Trainer:
 
         # Data Parameters
         self.stride_size = 32
-        self.tile_size = 384
         self.global_crop_size = 224
         self.local_crop_size = 96
         self.local_crops_number = 8
@@ -103,7 +102,7 @@ class Trainer:
 
         # --- Masking, Data & Sampler ---
         self.mask_generator = MaskingGenerator(input_size=self.global_crop_size, stride_size=self.stride_size, mask_ratio=0.5)
-        dataset = SonarDataset(tile_size=self.tile_size)
+        dataset = SonarDataset()
         transform = SonarDataTransform(local_crops_number=self.local_crops_number, global_crops_size=self.global_crop_size, local_crops_size=self.local_crop_size)
         
         # Wrapper class to apply transform on the fly

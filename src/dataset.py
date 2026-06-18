@@ -15,7 +15,7 @@ class NormalizeTransform(torch.nn.Module):
         # Normalize inputs (centering around 0 for neural net stability)
         # Input is in [0, 1]. Mean and std are based on dataset stats
         self.transform = v2.Compose([
-            lambda x: torch.clamp(x, 0, 1),
+            # lambda x: torch.clamp(x, 0, 1),
             v2.Normalize(mean=[0.7706402539115733], std=[0.15731125981879593])
         ])
 
@@ -84,10 +84,9 @@ class SonarDataset(Dataset):
     Expected input: 384x384 numpy matrices, normalized [0, 1].
     Output: (1, 384, 384) FloatTensors.
     """
-    def __init__(self, data_dir="data/processed", ext="*.npz", tile_size=384):
+    def __init__(self, data_dir="data/processed", ext="*.npz"):
         super().__init__()
 
-        self.tile_crop = v2.RandomCrop(tile_size)
         self.files = sorted(glob.glob(os.path.join(data_dir, ext)))
         if len(self.files) == 0:
             raise ValueError(f"No files found in {data_dir} with extension {ext}")
@@ -115,7 +114,7 @@ class SonarDataset(Dataset):
         if torch.isnan(distances).any() or torch.isinf(distances).any():
             distances = torch.nan_to_num(distances, nan=0.0, posinf=1.0, neginf=0.0)
 
-        return self.tile_crop(data, distances)
+        return data, distances
 
 
 class SonarDataTransform:
@@ -136,11 +135,10 @@ class SonarDataTransform:
             v2.RandomVerticalFlip(p=0.5),
         ])
 
-        # Note: RandomResizedCrop is not used since it can distort the aspect ratio leading to uniform stretching
-        # which breaks the physics of sonar imagery. Instead, we use RandomCrop to maintain the original aspect
-        # ratio and spatial relationships.
-        self.global_crop = v2.RandomCrop(global_crops_size)
-        self.local_crop = v2.RandomCrop(local_crops_size)
+        # Note: A dynamic aspect ratio is not used since it can lead to uniform stretching which
+        # breaks the physics of sonar imagery. Antialias introduces blur, see the note below.
+        self.global_crop = v2.RandomResizedCrop(global_crops_size, scale=(0.3, 1.0), ratio=(1.0, 1.0), antialias=False)
+        self.local_crop = v2.RandomResizedCrop(local_crops_size, scale=(0.05, 0.3), ratio=(1.0, 1.0), antialias=False)
 
         # Note: Blur shouldn't be used with sonar since it breaks the physics (no lens is used).
         # If you want to make the image or objects unclear, increase the noise instead to remain
