@@ -49,9 +49,9 @@ class PreTrainer:
         self.local_crops_number = 0
 
         # --- Hyperparameters ---
-        self.batch_size = 64 // self.world_size  # Adjust based on your VRAM
-        self.epochs = 100
-        self.lr = 1e-4
+        self.batch_size = 256 // self.world_size  # Adjust based on your VRAM
+        self.epochs = 10
+        self.lr = 1e-2
         self.weight_decay = 0.05
         self.mask_ratio = 0.60  # MAE usually benefits from a high masking ratio
 
@@ -138,13 +138,13 @@ class PreTrainer:
 
             with torch.amp.autocast('cuda'):
                 # 1. Forward backbone with the augmented masked view
-                _, x_patch_flat = self.backbone(student_crop, mask=active_masks)
+                x_cls, x_patch_flat = self.backbone(student_crop, mask=active_masks)
 
                 # 2. Reconstruct pixels
                 reconstructed = self.recon_head(x_patch_flat, h_grid=mask_grid_h, w_grid=mask_grid_w)
 
-                # 3. Simple MSE loss against the unaugmented original view
-                loss = F.mse_loss(reconstructed, teacher_crop)
+                # 3. Simple MSE loss against the unaugmented original view (ignore cls token)
+                loss = 0.0 * x_cls.sum() + F.mse_loss(reconstructed, teacher_crop)
 
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
@@ -199,10 +199,6 @@ if __name__ == "__main__":
             filename=f"logs/pretrain_{time.time()}.log",
             level=logging.INFO
         )
-        # Also print to console
-        console = logging.StreamHandler()
-        console.setLevel(logging.INFO)
-        logging.getLogger('').addHandler(console)
     else:
         logging.basicConfig(level=logging.ERROR)
 
