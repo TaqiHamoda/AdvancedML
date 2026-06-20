@@ -214,15 +214,19 @@ class ConvNeXtV2(nn.Module):
         if arch == "tiny":
             depths = [3, 3, 9, 3]
             dims = [96, 192, 384, 768]
+            fusion_dim = 512
         elif arch == "base":
             depths = [3, 3, 27, 3]
             dims = [128, 256, 512, 1024]
+            fusion_dim = 768
         elif arch == "large":
             depths = [3, 3, 27, 3]
             dims = [192, 384, 768, 1536]
+            fusion_dim = 1408
         elif arch == "huge":
             depths = [3, 3, 27, 3]
             dims = [352, 704, 1408, 2816]
+            fusion_dim = 2581
         else:
             raise ValueError(f"Configuration {arch} doesn't exist. Please use one of the supported configurations: tiny, base, large, huge.")
 
@@ -249,7 +253,7 @@ class ConvNeXtV2(nn.Module):
             self.stages.append(stage_blocks)
             cur += depths[i]
 
-        self.fusion = FeatureFusionBlock(dims[1:])
+        self.fusion = FeatureFusionBlock(dims[1:], middle_dim=fusion_dim)
 
         self.embed_dim = dims[-1]
 

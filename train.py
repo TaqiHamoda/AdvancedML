@@ -232,13 +232,14 @@ class Trainer:
             is_accumulating = ((i + 1) % self.accum_iter != 0) and ((i + 1) != len(self.loader))
             if self.is_distributed and is_accumulating:
                 ctx_student = self.student.no_sync()
-                ctx_ibot = self.student_dino_head.no_sync()
+                ctx_dino = self.student_dino_head.no_sync()
                 ctx_ibot = self.student_ibot_head.no_sync()
             else:
                 ctx_student = nullcontext()
+                ctx_dino = nullcontext()
                 ctx_ibot = nullcontext()
 
-            with ctx_student, ctx_ibot:
+            with ctx_student, ctx_dino, ctx_ibot:
                 with torch.amp.autocast('cuda'):
                     with torch.no_grad():
                         # Teacher gets no masks
@@ -399,6 +400,10 @@ class Trainer:
         iterator = range(start_epoch, self.epochs)
         if self.rank == 0:
             iterator = tqdm(iterator, desc="Training Epochs", initial=start_epoch, total=self.epochs)
+
+        self.student.train()
+        self.student_dino_head.train()
+        self.student_ibot_head.train()
 
         for epoch in iterator:
             self.train_one_epoch(epoch)
