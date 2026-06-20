@@ -178,6 +178,7 @@ class Trainer:
 
         # --- Optimizer ---
         params_to_optimize = self.get_params_groups(self.student)
+        params_to_optimize += self.get_params_groups(self.student_dino_head)
         params_to_optimize += self.get_params_groups(self.student_ibot_head)
         self.optimizer = optim.AdamW(
             params_to_optimize,
@@ -231,6 +232,7 @@ class Trainer:
             is_accumulating = ((i + 1) % self.accum_iter != 0) and ((i + 1) != len(self.loader))
             if self.is_distributed and is_accumulating:
                 ctx_student = self.student.no_sync()
+                ctx_ibot = self.student_dino_head.no_sync()
                 ctx_ibot = self.student_ibot_head.no_sync()
             else:
                 ctx_student = nullcontext()
@@ -301,6 +303,7 @@ class Trainer:
             if ((i + 1) % self.accum_iter == 0) or ((i + 1) == len(self.loader)):
                 self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(self.student_dino_head.parameters(), max_norm=1.0)
                 torch.nn.utils.clip_grad_norm_(self.student_ibot_head.parameters(), max_norm=1.0)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -313,6 +316,10 @@ class Trainer:
                     student_model = self.student.module if self.is_distributed else self.student
                     for param_q, param_k in zip(student_model.parameters(), self.teacher.parameters()):
                         param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
+
+                    student_dino_head = self.student_dino_head.module if self.is_distributed else self.student_dino_head
+                    for p_s, p_t in zip(student_dino_head.parameters(), self.teacher_dino_head.parameters()):
+                        p_t.data.mul_(m).add_((1 - m) * p_s.detach().data)
 
                     student_ibot_head = self.student_ibot_head.module if self.is_distributed else self.student_ibot_head
                     for p_s, p_t in zip(student_ibot_head.parameters(), self.teacher_ibot_head.parameters()):
@@ -331,12 +338,15 @@ class Trainer:
             checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
             if self.is_distributed:
                 self.student.module.load_state_dict(checkpoint['student'])
+                self.student_dino_head.module.load_state_dict(checkpoint['student_dino_head'])
                 self.student_ibot_head.module.load_state_dict(checkpoint['student_ibot_head'])
             else:
                 self.student.load_state_dict(checkpoint['student'])
+                self.student_dino_head.load_state_dict(checkpoint['student_dino_head'])
                 self.student_ibot_head.load_state_dict(checkpoint['student_ibot_head'])
 
             self.teacher.load_state_dict(checkpoint['teacher'])
+            self.teacher_dino_head.load_state_dict(checkpoint['teacher_dino_head'])
             self.teacher_ibot_head.load_state_dict(checkpoint['teacher_ibot_head'])
 
             self.optimizer.load_state_dict(checkpoint['optimizer'])
@@ -396,8 +406,10 @@ class Trainer:
                 save_dict = {
                     'epoch': epoch,
                     'student': self.student.module.state_dict() if self.is_distributed else self.student.state_dict(),
+                    'student_dino_head': self.student_dino_head.module.state_dict() if self.is_distributed else self.student_dino_head.state_dict(),
                     'student_ibot_head': self.student_ibot_head.module.state_dict() if self.is_distributed else self.student_ibot_head.state_dict(),
                     'teacher': self.teacher.state_dict(),
+                    'teacher_dino_head': self.teacher_dino_head.state_dict(),
                     'teacher_ibot_head': self.teacher_ibot_head.state_dict(),
                     'optimizer': self.optimizer.state_dict(),
                     'scaler': self.scaler.state_dict(),

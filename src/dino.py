@@ -350,17 +350,17 @@ class ReconstructionHead(nn.Module):
         x_patch_flat: (B, N, C) - Flattened patch features from ConvNeXtV2
         """
         B, N, C = x_patch_flat.shape
-        
+
         # If grid dimensions aren't explicitly provided, assume a square image crop
         if h_grid is None or w_grid is None:
             h_grid = w_grid = int(N ** 0.5)
-            
-        # 1. Unflatten: (B, N, C) -> (B, C, N) -> (B, C, h_grid, w_grid)
+
+        # (B, N, C) -> (B, C, N) -> (B, C, h_grid, w_grid)
         x_spatial = x_patch_flat.transpose(1, 2).view(B, C, h_grid, w_grid)
-        
-        # 2. Upsample to pixels: (B, C, h_grid, w_grid) -> (B, in_chans, h_grid*32, w_grid*32)
+
+        # (B, C, h_grid, w_grid) -> (B, in_chans, h_grid*32, w_grid*32)
         reconstructed_pixels = self.head(x_spatial)
-        
+
         return reconstructed_pixels
 
 
