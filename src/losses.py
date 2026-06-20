@@ -107,25 +107,25 @@ class SinkhornKnopp(nn.Module):
 
 
 class DINOLoss(Centering):
-    def forward(self, student_output, teacher_output, teacher_temp):
+    def forward(self, student_output, teacher_output, teacher_temp, n_teacher_crops = 2):
         """
         Args:
             student_output: (S * B, D) student logits
             teacher_output: (T * B, D) teacher logits
             teacher_temp: scalar temperature
+            n_teacher_crops: number of teacher crops
         """
         s_log_probs, t_probs = self.get_probs(student_output, teacher_output, teacher_temp)
 
-        n_teacher_crops = 2
         B = teacher_output.shape[0] // n_teacher_crops
 
         # Reshape to (n_crops, B, D)
         n_student_crops = student_output.shape[0] // B
-        t_probs = t_probs.view(n_teacher_crops, B, -1)
-        s_log_probs = s_log_probs.view(n_student_crops, B, -1)
+        t_probs = t_probs.view(B, n_teacher_crops, -1)
+        s_log_probs = s_log_probs.view(B, n_student_crops, -1)
 
         # Cross-Entropy Loss
-        loss_matrix = -torch.einsum("sbk,tbk->st", s_log_probs, t_probs)
+        loss_matrix = -torch.einsum("bsk,btk->st", s_log_probs, t_probs)
 
         # Remove diagonal (same crop comparison)
         min_crops = min(n_student_crops, n_teacher_crops)
@@ -138,19 +138,9 @@ class DINOLoss(Centering):
 
 
 class iBOTPatchLoss(Centering):
-    def forward(self, student_patches, teacher_patches, masks, teacher_temp):
+    def forward(self, student_patches, teacher_patches, teacher_temp):
         s_log_probs, t_probs = self.get_probs(student_patches, teacher_patches, teacher_temp)
-
-        # Cross Entropy
-        loss_per_token = torch.sum(-t_probs * s_log_probs, dim=-1)
-
-        # Weighted Mean
-        n_masked_per_image = masks.sum(dim=1).clamp(min=1.0)
-        weights_per_image = 1.0 / n_masked_per_image
-        weights_expanded = weights_per_image.unsqueeze(1).expand_as(masks)
-        weights_flat = weights_expanded[masks.bool()]
-
-        return (loss_per_token * weights_flat).sum() / masks.shape[0]
+        return torch.sum(-t_probs * s_log_probs, dim=-1).mean()  # Cross Entropy Loss
 
 
 class GramLoss(nn.Module):

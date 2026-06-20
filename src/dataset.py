@@ -235,8 +235,14 @@ class TransformedDataset(torch.utils.data.Dataset):
         # Collate standard crops
         for model in output.keys():
             for crop in output[model].keys():
-                for i in range(len(batch[0][model][crop])):
-                    output[model][crop].append(torch.stack([item[model][crop][i] for item in batch]))
+                for item in batch:
+                    for i in range(len(item[model][crop])):
+                        output[model][crop].append(item[model][crop][i])
+
+        for model in output.keys():
+            for crop in output[model].keys():
+                if len(output[model][crop]) > 0:
+                    output[model][crop] = torch.stack(output[model][crop])
 
         return output
 
@@ -268,13 +274,13 @@ class MaskingGenerator:
             aspect_ratio = math.exp(random.uniform(*self.log_aspect_ratio))
             h = int(round(math.sqrt(target_area * aspect_ratio)))
             w = int(round(math.sqrt(target_area / aspect_ratio)))
-            
+
             if w < self.width and h < self.height:
                 top = random.randint(0, self.height - h)
                 left = random.randint(0, self.width - w)
 
                 num_masked = mask[top : top + h, left : left + w].sum()
-                
+
                 # Check if we are overlapping too much or adding too many patches
                 if 0 < h * w - num_masked <= max_mask_patches:
                     for i in range(top, top + h):
@@ -310,4 +316,4 @@ class MaskingGenerator:
              mask_flat[to_add] = 1
              mask = mask_flat.reshape((self.height, self.width))
 
-        return mask.flatten() # Returns (N_patches,) for compatibility with your training loop
+        return mask

@@ -13,6 +13,19 @@ def dense_to_sparse(x, mask):
     return spconv.SparseConvTensor(features, indices, [H, W], B)
 
 
+class SpatialLayerNorm(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim, eps=1e-6)
+
+    def forward(self, x):
+        x = x.permute(0, 2, 3, 1)
+        x = self.norm(x)
+        x = x.permute(0, 3, 1, 2)
+
+        return x
+
+
 class SparseDownsample(nn.Module):
     def __init__(self, in_chans, out_chans, kernel_size, stride):
         super().__init__()
@@ -80,12 +93,12 @@ class SparseDepthwiseBypass(nn.Module):
         super().__init__()
         self.dwconv = nn.Conv2d(
             dim, dim, 
-            kernel_size=kernel_size, 
-            padding=kernel_size // 2, 
-            groups=dim, 
+            kernel_size=kernel_size,
+            padding=kernel_size // 2,
+            groups=dim,
             bias=True
         )
-        
+
     def forward(self, x: spconv.SparseConvTensor):
         dense_x = x.dense()
 
@@ -140,22 +153,6 @@ class SparseBlock(nn.Module):
         return x_sp.replace_feature(shortcut_features + features)
 
 
-class DenseStem(nn.Module):
-    def __init__(self, in_chans, out_chans, kernel_size=4, stride=4):
-        super().__init__()
-        self.conv = nn.Conv2d(in_chans, out_chans, kernel_size=kernel_size, stride=stride)
-        self.norm = nn.LayerNorm(out_chans, eps=1e-6)
-
-    def forward(self, x):
-        x = self.conv(x)
-        # Permute to (B, H, W, C) for standard LayerNorm
-        x = x.permute(0, 2, 3, 1)
-        x = self.norm(x)
-        # Permute back to (B, C, H, W)
-        x = x.permute(0, 3, 1, 2)
-        return x
-
-
 class ConvNeXtV2Decoder(nn.Module):
     """Lightweight MAE decoder to provide context to masked patches."""
     def __init__(self, encoder_dim=768, decoder_dim=512):
@@ -164,7 +161,7 @@ class ConvNeXtV2Decoder(nn.Module):
         self.mask_token = nn.Parameter(torch.zeros(1, decoder_dim, 1, 1))
         nn.init.trunc_normal_(self.mask_token, std=.02)
         self.block = SparseBlock(dim=decoder_dim)
-        self.head_proj = nn.Linear(decoder_dim, encoder_dim) 
+        self.head_proj = nn.Linear(decoder_dim, encoder_dim)
 
     def forward(self, x, active_mask):
         x = self.proj(x)
@@ -183,8 +180,35 @@ class ConvNeXtV2Decoder(nn.Module):
         return self.head_proj(x.flatten(2).transpose(1, 2))
 
 
+class FeatureFusionBlock(nn.Module):
+    """Fuses the output from multiple stages into a semantically compressed hypercolumn."""
+    def __init__(self, stage_dims, middle_dim=512):
+        super().__init__()
+
+        in_dim = sum(stage_dims)
+        out_dim = stage_dims[-1]
+
+        self.mlp = nn.Sequential(
+            nn.Conv2d(in_dim, middle_dim, kernel_size=1),
+            nn.GELU(),
+            SpatialLayerNorm(middle_dim),
+            nn.Conv2d(middle_dim, out_dim, kernel_size=1)
+        )
+
+
+    def forward(self, stages):
+        target_size = stages[0].shape[-2:]
+
+        upsampled = [stages[0]]
+        for s in stages[1:]:
+            upsampled.append(F.interpolate(s, size=target_size, mode='bilinear', align_corners=False))
+
+        fused = torch.cat(upsampled, dim=1) 
+        return self.mlp(fused)
+
+
 class ConvNeXtV2(nn.Module):
-    def __init__(self, in_chans=1, drop_path_rate=0.0, decoder_dim=512, arch="tiny"):
+    def __init__(self, in_chans=1, drop_path_rate=0.0, arch="tiny"):
         super().__init__()
 
         if arch == "tiny":
@@ -202,8 +226,15 @@ class ConvNeXtV2(nn.Module):
         else:
             raise ValueError(f"Configuration {arch} doesn't exist. Please use one of the supported configurations: tiny, base, large, huge.")
 
+        decoder_dim = dims[-2]
+
         self.downsample_layers = nn.ModuleList()
-        self.downsample_layers.append(DenseStem(in_chans, dims[0], kernel_size=4, stride=4))
+
+        # Add a dense stem first to prevent boundary artifacts from sparse conv
+        self.downsample_layers.append(nn.Sequential(
+            nn.Conv2d(in_chans, dims[0], kernel_size=4, stride=4),
+            SpatialLayerNorm(dims[0])
+        ))
         for i in range(3):
             self.downsample_layers.append(SparseDownsample(dims[i], dims[i+1], kernel_size=2, stride=2))
 
@@ -218,14 +249,16 @@ class ConvNeXtV2(nn.Module):
             self.stages.append(stage_blocks)
             cur += depths[i]
 
-        # Use standard PyTorch LayerNorms now (we'll handle channel permutation in forward)
-        self.norm_patch = nn.LayerNorm(dims[-1], eps=1e-6)
-        self.norm_cls = nn.LayerNorm(dims[-1], eps=1e-6) 
+        self.fusion = FeatureFusionBlock(dims[1:])
 
-        self.decoder = ConvNeXtV2Decoder(encoder_dim=dims[-1], decoder_dim=decoder_dim)
+        self.embed_dim = dims[-1]
+
+        self.norm_patch = SpatialLayerNorm(self.embed_dim)
+        self.norm_cls = nn.LayerNorm(self.embed_dim, eps=1e-6)
+
+        self.decoder = ConvNeXtV2Decoder(encoder_dim=self.embed_dim, decoder_dim=decoder_dim)
 
         self.apply(self._init_weights)
-        self.embed_dim = dims[-1]
 
     def _init_weights(self, m):
         if isinstance(m, (nn.Conv2d, nn.Linear)):
@@ -265,41 +298,36 @@ class ConvNeXtV2(nn.Module):
             stage_out = x_sparse.dense()
             outputs.append(stage_out)
 
-            if i != 3:
-                continue
+        return outputs
 
-            if mask is not None:
-                scale_h = stage_out.shape[-2] // mask.shape[-2]
-                scale_w = stage_out.shape[-1] // mask.shape[-1]
-                mask_x = mask.repeat_interleave(scale_h, dim=1).repeat_interleave(scale_w, dim=2)
+    def _get_output(self, x, mask=None):
+        x_patch_spatial = self.norm_patch(x)
 
-                stage_out_masked = stage_out * mask_x.unsqueeze(1)
-                active_count = mask_x.sum(dim=(-1, -2)).unsqueeze(-1) + 1e-6
+        if mask is not None:
+            scale_h = x.shape[-2] // mask.shape[-2]
+            scale_w = x.shape[-1] // mask.shape[-1]
+            mask_x = mask.repeat_interleave(scale_h, dim=1).repeat_interleave(scale_w, dim=2)
 
-                x_cls = stage_out_masked.sum([-2, -1]) / active_count
-            else:
-                x_cls = stage_out.mean([-2, -1])
+            x_masked = x * mask_x.unsqueeze(1)
+            active_count = mask_x.sum(dim=(-1, -2)).unsqueeze(-1) + 1e-6
 
-
-        return outputs, x_cls
-
-    def forward(self, x, mask=None):
-        outputs = self._inference(x, mask)
-
-        x, x_cls = outputs[0][-1], outputs[1]
+            x_cls = x_masked.sum([-2, -1]) / active_count
+            x_patch_flat = self.decoder(x_patch_spatial, mask_x)  # Reconstruct masked sites with context
+        else:
+            x_cls = x.mean([-2, -1])
+            x_patch_flat = x_patch_spatial.flatten(2).transpose(1, 2)  # (B, C, H, W) -> (B, H*W, C)
 
         x_cls = self.norm_cls(x_cls)
-        x_patch_spatial = self.norm_patch(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2) 
-
-        # Conditional Decoding
-        if mask is not None:
-            # Reconstruct masked sites with context
-            x_patch_flat = self.decoder(x_patch_spatial, mask)
-        else:
-            # Standard dense flattening (B, C, H, W) -> (B, H*W, C)
-            x_patch_flat = x_patch_spatial.flatten(2).transpose(1, 2)
 
         return x_cls, x_patch_flat
+
+    def _fcmae(self, x, mask=None):
+        x = self._inference(x, mask)[-1]
+        return self._get_output(x, mask)
+
+    def forward(self, x, mask=None):
+        x = self.fusion(self._inference(x, mask)[1:])
+        return self._get_output(x, mask)
 
 
 class ReconstructionHead(nn.Module):
@@ -337,29 +365,19 @@ class ReconstructionHead(nn.Module):
 
 
 class DINOHead(nn.Module):
-    def __init__(self, in_dim, out_dim, use_bn=False, norm_last_layer=True, nlayers=3, hidden_dim=2048, bottleneck_dim=256):
+    def __init__(self, in_dim, out_dim, hidden_dim=512, bottleneck_dim=256):
         super().__init__()
-        nlayers = max(nlayers, 1)
 
-        if nlayers == 1:
-            self.mlp = nn.Linear(in_dim, bottleneck_dim)
-        else:
-            layers = [nn.Linear(in_dim, hidden_dim)]
-            if use_bn:
-                layers.append(nn.BatchNorm1d(hidden_dim))
-
-            layers.append(nn.GELU())
-            for _ in range(nlayers - 2):
-                layers.append(nn.Linear(hidden_dim, hidden_dim))
-                if use_bn:
-                    layers.append(nn.BatchNorm1d(hidden_dim))
-                layers.append(nn.GELU())
-
-            layers.append(nn.Linear(hidden_dim, bottleneck_dim))
-            self.mlp = nn.Sequential(*layers)
-
-        self.last_layer = nn.Linear(bottleneck_dim, out_dim, bias=False)
-        self.norm_last_layer = norm_last_layer
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, bottleneck_dim),
+            nn.GELU(),
+            nn.LayerNorm(bottleneck_dim),
+            nn.Linear(bottleneck_dim, out_dim, bias=False),
+            nn.LayerNorm(out_dim),
+        )
 
         self.apply(self._init_weights)
 
@@ -370,60 +388,4 @@ class DINOHead(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        x = self.mlp(x)
-        x = F.normalize(x, dim=-1, p=2) # L2 normalize bottleneck
-
-        if self.norm_last_layer:
-            # Manually apply weight normalization (L2 norm of weight vector = 1)
-            w = F.normalize(self.last_layer.weight, p=2, dim=1)
-            x = F.linear(x, w)
-        else:
-            x = self.last_layer(x)
-
-        return x
-
-
-class MultiCropWrapper(nn.Module):
-    def __init__(self, backbone, head):
-        super().__init__()
-        self.backbone = backbone
-        self.head = head
-
-    def forward(self, x, masks=None):
-        if not isinstance(x, list):
-            return self.backbone(x, mask=masks)
-
-        output_cls_tokens = []
-        output_patch_tokens_list = []
-
-        start_idx = 0
-        n_crops = len(x)
-        current_res = x[0].shape[-1]
-
-        # If no masks are passed, create a list of Nones
-        if masks is None:
-            masks = [None] * n_crops
-
-        for i in range(1, n_crops + 1):
-            if i == n_crops or x[i].shape[-1] != current_res:
-                end_idx = i
-                block_input = torch.cat(x[start_idx:end_idx])
-
-                # Check if this crop block has masks
-                block_masks = masks[start_idx:end_idx]
-                if all(m is None for m in block_masks):
-                    block_mask = None
-                else:
-                    block_mask = torch.cat(block_masks)
-
-                # Pass both images and masks to ConvNeXt
-                _out_cls, _out_patch = self.backbone(block_input, mask=block_mask)
-                output_cls_tokens.append(_out_cls)
-                output_patch_tokens_list.append(_out_patch)
-
-                if i < n_crops:
-                    start_idx = i
-                    current_res = x[i].shape[-1]
-
-        output_cls = torch.cat(output_cls_tokens)
-        return self.head(output_cls), output_patch_tokens_list, output_cls
+        return self.mlp(x)

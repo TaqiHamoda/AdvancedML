@@ -11,10 +11,11 @@ import numpy as np
 import logging
 from tqdm import tqdm
 import os, time
+from pathlib import Path
 
 # Import your modules
 from src.dataset import MaskingGenerator, TransformedDataset
-from src.dino import ConvNeXtV2, DINOHead, MultiCropWrapper
+from src.dino import ConvNeXtV2, DINOHead
 from src.losses import DINOLoss, iBOTPatchLoss, GramLoss, KoLeoLoss, HSICLoss, LinearHSICLoss, RFFHSICLoss
 
 logger = logging.getLogger(__name__)
@@ -76,14 +77,14 @@ class Trainer:
 
         self.teacher_temp_start = 0.04
         self.teacher_temp_end = 0.07
-        self.momentum_teacher_start = 0.994
+        self.momentum_teacher_start = 0.996
         self.momentum_teacher_end = 1.0
 
         self.w_dino = 1.0
         self.w_ibot = 1.0
         self.w_gram = 0.5
         self.w_hsic = 0.0
-        self.w_koleo = 0.1
+        self.w_koleo = 0.01
 
         # --- Masking, Data & Sampler ---
         self.mask_generator = MaskingGenerator(input_size=self.global_crops_size, stride_size=self.stride_size, mask_ratio=0.5)
@@ -142,36 +143,30 @@ class Trainer:
         self.scaler = torch.amp.GradScaler('cuda')
 
         # --- Models ---
-        student_backbone = ConvNeXtV2(in_chans=1)
-        teacher_backbone = ConvNeXtV2(in_chans=1)
-        embed_dim = student_backbone.embed_dim
+        self.student = ConvNeXtV2(in_chans=1).to(self.device)
+        self.teacher = ConvNeXtV2(in_chans=1).to(self.device)
+        embed_dim = self.student.embed_dim
 
-        student_head = DINOHead(embed_dim, out_dim=self.output_dim)
-        teacher_head = DINOHead(embed_dim, out_dim=self.output_dim)
-
-        self.student = MultiCropWrapper(student_backbone, student_head).to(self.device)
-        self.teacher = MultiCropWrapper(teacher_backbone, teacher_head).to(self.device)
+        self.student_dino_head = DINOHead(embed_dim, out_dim=self.output_dim).to(self.device)
+        self.teacher_dino_head = DINOHead(embed_dim, out_dim=self.output_dim).to(self.device)
 
         self.teacher.eval()  # Teacher is not trained with gradients
         for p in self.teacher.parameters():
             p.requires_grad = False
         self.teacher.load_state_dict(self.student.state_dict())
 
-        # Add iBOT Heads (Separate from DINO Head)
-        # They project patch tokens (embed_dim) -> prototypes (output_dim)
-        student_ibot_head = DINOHead(embed_dim, out_dim=self.output_dim)
-        teacher_ibot_head = DINOHead(embed_dim, out_dim=self.output_dim)
+        self.student_ibot_head = DINOHead(embed_dim, out_dim=self.output_dim).to(self.device)
+        self.teacher_ibot_head = DINOHead(embed_dim, out_dim=self.output_dim).to(self.device)
 
-        self.student_ibot_head = student_ibot_head.to(self.device)
-        self.teacher_ibot_head = teacher_ibot_head.to(self.device)
         self.teacher_ibot_head.eval()
-        teacher_ibot_head.load_state_dict(student_ibot_head.state_dict())
+        self.teacher_ibot_head.load_state_dict(self.student_ibot_head.state_dict())
         for p in self.teacher_ibot_head.parameters(): p.requires_grad = False
 
         # --- DDP Wrapping ---
         if self.is_distributed:
             # Wrap student. Teacher is NOT wrapped (no gradients).
             self.student = DDP(self.student, device_ids=[self.local_rank])
+            self.student_dino_head = DDP(self.student_dino_head, device_ids=[self.local_rank])
             self.student_ibot_head = DDP(self.student_ibot_head, device_ids=[self.local_rank])
 
         # --- Losses ---
@@ -219,33 +214,19 @@ class Trainer:
                 if param_group['weight_decay'] > 0:
                     param_group['weight_decay'] = self.weight_decay
 
-            teacher_global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['teacher']['global_crops']]
-            student_global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['student']['global_crops']]
-            student_local_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['student']['local_crops']]
-            distance_global_crops = [c.to(self.device, non_blocking=True) for c in batch_imgs['distances']['global_crops']]
+            # Shape of each item is (B * N_patches, C, W, H)
+            teacher_global_crops = batch_imgs['teacher']['global_crops'].to(self.device)
+            student_global_crops = batch_imgs['student']['global_crops'].to(self.device)
+            student_local_crops = batch_imgs['student']['local_crops'].to(self.device)
+            distance_global_crops = batch_imgs['distances']['global_crops'].to(self.device)
 
-            B = student_global_crops[0].shape[0]
             masks_list = []
-            for _ in range(B * 2): 
-                m = self.mask_generator() # 1/True usually means "Drop" here
-                masks_list.append(torch.from_numpy(m).bool())
+            for _ in range(student_global_crops.shape[0]):
+                masks_list.append(torch.from_numpy(self.mask_generator()).bool())  # True means "Drop" here
 
-            # Original iBOT mask (2*B, N_patches). True = Dropped.
-            masks = torch.stack(masks_list).to(self.device)
-
-            mask_grid_h = student_global_crops[0].shape[-2] // self.stride_size
-            mask_grid_w = student_global_crops[0].shape[-1] // self.stride_size
-
-            masks_spatial = masks.view(-1, mask_grid_h, mask_grid_w)
-            active_masks = ~masks_spatial
-
-            # Split the active mask into two chunks for the two global crops
-            active_masks_chunked = list(torch.chunk(active_masks, 2, dim=0))
-
-            all_student_crops = student_global_crops + student_local_crops
-            all_student_masks = active_masks_chunked + [None] * len(student_local_crops)  # Local crops don't get masked
-
-            masks_flat = masks.view(masks.shape[0], -1).bool()
+            # Original iBOT mask (B * N_patches, C, W, H). True = Keep.
+            active_masks = torch.stack(masks_list).to(self.device)
+            active_masks = ~active_masks
 
             is_accumulating = ((i + 1) % self.accum_iter != 0) and ((i + 1) != len(self.loader))
             if self.is_distributed and is_accumulating:
@@ -259,60 +240,49 @@ class Trainer:
                 with torch.amp.autocast('cuda'):
                     with torch.no_grad():
                         # Teacher gets no masks
-                        teacher_output, teacher_patches_list, _ = self.teacher(teacher_global_crops, masks=None)
-                        
-                        t_patches = torch.cat(teacher_patches_list, dim=0)  # (2*B, N, D)
-                        t_patches_masked = t_patches[masks_flat]  # (Total_Masked_Tokens, D)
-                        t_ibot_out = self.teacher_ibot_head(t_patches_masked)  # (Total_Masked_Tokens, K)
+                        teacher_cls, teacher_patches = self.teacher(teacher_global_crops, mask=None)
 
-                    # Student gets the crops AND the masks
-                    student_output, student_patches_list, student_cls = self.student(all_student_crops, masks=all_student_masks)
+                        scale_factor = int(teacher_patches.shape[-2] ** 0.5) // active_masks.shape[-1]
+                        upsampled_masks = active_masks.repeat_interleave(scale_factor, dim=1).repeat_interleave(scale_factor, dim=2)
+                        upsampled_masks = upsampled_masks.flatten(1)  # (B, H, W) -> (B, H*W)
+
+                        t_patches = teacher_patches[upsampled_masks]
+
+                        t_dino_out = self.teacher_dino_head(teacher_cls)  # (B * N_patches, output_dim)
+                        t_ibot_out = self.teacher_ibot_head(t_patches)  # (Total_Masked_Tokens, K)
+
+                    student_global_cls, student_global_patches = self.student(student_global_crops, mask=active_masks)
+
+                    s_global_patches = student_global_patches[upsampled_masks]
+                    s_dino_global_out = self.student_dino_head(student_global_cls)  # (B * N_patches, output_dim)
+                    s_ibot_out = self.student_ibot_head(s_global_patches)  # (Total_Masked_Tokens, K)
+
+                    student_local_cls, student_local_patches = self.student(student_local_crops, mask=None)
+                    s_dino_local_out = self.student_dino_head(student_local_cls)  # (B * N_patches, output_dim)
+
+                    # Interleave the student outputs per image before calculating loss
+                    s_dino_out = torch.cat([
+                        s_dino_global_out.view(self.batch_size, self.global_crops_number, -1),
+                        s_dino_local_out.view(self.batch_size, self.local_crops_number, -1)
+                    ], dim=1)
+                    s_dino_out = s_dino_out.reshape(-1, s_dino_out.shape[-1])
 
                     current_teacher_temp = self.teacher_temp_schedule[it]
-                    loss_dino = self.dino_loss_fn(student_output, teacher_output, current_teacher_temp)
 
-                    # iBOT Loss (Patch tokens)
-                    # Select only the global crop patches from student output (first 2 items)
-                    s_global_patches = student_patches_list[0]  # (2*B, N, D)
-                    s_patches_masked = s_global_patches[masks_flat]  # (Total_Masked_Tokens, D)
-                    s_ibot_out = self.student_ibot_head(s_patches_masked)  # (Total_Masked_Tokens, K)
-                    loss_ibot = self.ibot_loss_fn(
-                        s_ibot_out,
-                        t_ibot_out,
-                        masks,
-                        current_teacher_temp
-                    )
-
-                    B_features, N_patches, D = s_global_patches.shape
-                    num_crops = B_features // student_global_crops[0].shape[0]
-                    dist_crops_cat = torch.cat(distance_global_crops[:num_crops], dim=0) # (B_features, 1, 288, 288)
-
-                    grid_size = int(round(N_patches ** 0.5))
-                    if grid_size * grid_size == N_patches:
-                        patch_dist = F.adaptive_avg_pool2d(dist_crops_cat, (grid_size, grid_size))
-                    else:
-                        patch_dist = F.adaptive_avg_pool2d(dist_crops_cat, (N_patches, 1))
-
-                    patch_dist_flat = patch_dist.view(B_features, -1, 1) # (B_features, N_patches, 1)
-
-                    loss_hsic = self.hsic_loss_fn(
-                        s_global_patches.view(-1, D), 
-                        patch_dist_flat.view(-1, 1).to(s_global_patches.dtype)
-                    )
-
-                    student_cls_chunked = student_cls.chunk(len(all_student_crops))
-                    loss_koleo = self.koleo_loss_fn(student_cls_chunked[0])  # Pass ONLY the first global crop (unique independent images)
+                    loss_dino = self.dino_loss_fn(s_dino_out, t_dino_out, current_teacher_temp, n_teacher_crops=self.global_crops_number)
+                    loss_ibot = self.ibot_loss_fn(s_ibot_out, t_ibot_out, current_teacher_temp)
+                    loss_koleo = self.koleo_loss_fn(s_dino_global_out[::2])  # Pass ONLY the even rows (unique independent images)
 
                     # loss_gram = self.gram_loss_fn(student_patches_list[0], teacher_patches_list[0])
                     # loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)
-                    loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_hsic * loss_hsic) + (self.w_koleo * loss_koleo)
+                    loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_koleo * loss_koleo)
                     loss = loss / self.accum_iter  # Normalize loss to account for accumulation
 
                 # Log only on Master
                 if self.rank == 0 and i % self.accum_iter == 0:
                     logger.info(f"Epoch {epoch_index:03d} [{i:04d}/{len(self.loader)}] "
                         f"lr: {current_lr:.6f}, t: {self.teacher_temp_schedule[it]:.4f}, m: {self.momentum_schedule[it]:.4f}, "
-                        f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, HSIC: {loss_hsic.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
+                        f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
                         # f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
 
                 # Backward pass (Accumulates gradients into .grad attributes)
@@ -320,13 +290,13 @@ class Trainer:
 
             # Manually delete heavy tensors to free VRAM for the next iteration
             # del loss, loss_ibot, loss_gram, loss_koleo
-            del loss, loss_ibot, loss_koleo
-            del student_output, teacher_output
-            del s_ibot_out, t_ibot_out
-            del teacher_global_crops, student_global_crops, student_local_crops, masks
-            del student_patches_list, teacher_patches_list
-            del student_cls, masks_flat
-            del all_student_crops, all_student_masks
+            del loss, loss_dino, loss_ibot, loss_koleo
+            del s_dino_out, t_dino_out, s_ibot_out, t_ibot_out
+            del student_local_cls, student_local_patches, s_dino_local_out
+            del s_dino_global_out, s_global_patches, student_global_cls, student_global_patches
+            del t_patches, upsampled_masks, teacher_patches, teacher_cls
+            del distance_global_crops, student_local_crops, student_global_crops, teacher_global_crops
+            del active_masks, masks_list
 
             if ((i + 1) % self.accum_iter == 0) or ((i + 1) == len(self.loader)):
                 self.scaler.unscale_(self.optimizer)
@@ -349,36 +319,56 @@ class Trainer:
                         p_t.data.mul_(m).add_((1 - m) * p_s.detach().data)
 
 
-    def load_checkpoint(self, checkpoint_path):
-        if checkpoint_path is None or not os.path.isfile(checkpoint_path):
-            if self.rank == 0: logger.warning(f"Checkpoint not found at {checkpoint_path}")
-            return -1
+    def load_checkpoint(self, resume_path):
+        checkpoint_path = resume_path / "checkpoint_latest.pth"
+        pretrained_path = resume_path / "pretrained.pth"
 
-        if self.rank == 0: logger.info(f"Loading checkpoint from {checkpoint_path}")
+        epoch = -1
+        if checkpoint_path.exists():
+            if self.rank == 0: logger.info(f"Loading checkpoint from {checkpoint_path}")
 
-        # Load on CPU first to avoid OOM, then move to device
-        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-        if self.is_distributed:
-            self.student.module.load_state_dict(checkpoint['student'])
-            self.student_ibot_head.module.load_state_dict(checkpoint['student_ibot_head'])
+            # Load on CPU first to avoid OOM, then move to device
+            checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+            if self.is_distributed:
+                self.student.module.load_state_dict(checkpoint['student'])
+                self.student_ibot_head.module.load_state_dict(checkpoint['student_ibot_head'])
+            else:
+                self.student.load_state_dict(checkpoint['student'])
+                self.student_ibot_head.load_state_dict(checkpoint['student_ibot_head'])
+
+            self.teacher.load_state_dict(checkpoint['teacher'])
+            self.teacher_ibot_head.load_state_dict(checkpoint['teacher_ibot_head'])
+
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+            self.scaler.load_state_dict(checkpoint['scaler'])
+
+            self.dino_loss_fn.load_state_dict(checkpoint['dino_loss'])
+            self.ibot_loss_fn.load_state_dict(checkpoint['ibot_loss'])
+
+            epoch = checkpoint['epoch'] + 1
+
+            # Free memory
+            del checkpoint
+            torch.cuda.empty_cache()
+        elif pretrained_path.exists():
+            if self.rank == 0: logger.info(f"Loading pretrained weights")
+
+            # Load on CPU first to avoid OOM, then move to device
+            checkpoint = torch.load(pretrained_path, map_location='cpu', weights_only=False)
+            if self.is_distributed:
+                self.student.module.load_state_dict(checkpoint['backbone'])
+            else:
+                self.student.load_state_dict(checkpoint['backbone'])
+
+            self.teacher.load_state_dict(checkpoint['backbone'])
+
+            epoch = 0
+
+            # Free memory
+            del checkpoint
+            torch.cuda.empty_cache()
         else:
-            self.student.load_state_dict(checkpoint['student'])
-            self.student_ibot_head.load_state_dict(checkpoint['student_ibot_head'])
-
-        self.teacher.load_state_dict(checkpoint['teacher'])
-        self.teacher_ibot_head.load_state_dict(checkpoint['teacher_ibot_head'])
-
-        self.optimizer.load_state_dict(checkpoint['optimizer'])
-        self.scaler.load_state_dict(checkpoint['scaler'])
-
-        self.dino_loss_fn.load_state_dict(checkpoint['dino_loss'])
-        self.ibot_loss_fn.load_state_dict(checkpoint['ibot_loss'])
-
-        epoch = checkpoint['epoch']
-
-        # Free memory
-        del checkpoint
-        torch.cuda.empty_cache()
+            if self.rank == 0: logger.warning(f"Checkpoint not found at {checkpoint_path}")
 
         return epoch
 
@@ -387,7 +377,7 @@ class Trainer:
 
         loaded_data = self.load_checkpoint(resume_path)
         if loaded_data > -1:
-            start_epoch = loaded_data + 1
+            start_epoch = loaded_data
             if self.rank == 0: 
                 logger.info(f"Resuming training from epoch {start_epoch}")
 
@@ -436,8 +426,8 @@ if __name__ == "__main__":
 
     trainer = Trainer()
 
-    resume_file = "weights/checkpoint_latest.pth"
-    if os.path.exists(resume_file):
-        trainer.run(resume_path=resume_file)
+    resume_path = Path("weights/")
+    if resume_path.exists():
+        trainer.run(resume_path=resume_path)
     else:
         trainer.run()

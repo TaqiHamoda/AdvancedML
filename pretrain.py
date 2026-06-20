@@ -43,7 +43,7 @@ class PreTrainer:
         # --- Data Parameters ---
         self.stride_size = 32
         self.global_crops_size = 288
-        
+
         # Only 1 global crop for student and teacher, NO local crops
         self.global_crops_number = 1
         self.local_crops_number = 0
@@ -51,9 +51,9 @@ class PreTrainer:
         # --- Hyperparameters ---
         self.batch_size = 256 // self.world_size  # Adjust based on your VRAM
         self.epochs = 10
-        self.lr = 1e-2
+        self.lr = 5e-4
         self.weight_decay = 0.05
-        self.mask_ratio = 0.60  # MAE usually benefits from a high masking ratio
+        self.mask_ratio = 0.60  # Based on results in paper
 
         # --- Masking & Dataset ---
         self.mask_generator = MaskingGenerator(
@@ -61,7 +61,7 @@ class PreTrainer:
             stride_size=self.stride_size, 
             mask_ratio=self.mask_ratio
         )
-        
+
         self.dataset = TransformedDataset(
             global_crops_number=self.global_crops_number,
             local_crops_number=self.local_crops_number,
@@ -86,21 +86,29 @@ class PreTrainer:
 
         self.scaler = torch.amp.GradScaler('cuda')
 
-        # --- Models ---
-        self.backbone = ConvNeXtV2(in_chans=1).to(self.device)
-        self.recon_head = ReconstructionHead(
-            embed_dim=self.backbone.embed_dim, 
-            patch_size=self.stride_size, 
-            in_chans=1
-        ).to(self.device)
+        # --- Model ---
+        class Model(nn.Module):
+            def __init__(s):
+                super().__init__()
 
+                s.backbone = ConvNeXtV2(in_chans=1)
+                s.recon_head = ReconstructionHead(
+                    embed_dim=s.backbone.embed_dim,
+                    patch_size=self.stride_size,
+                    in_chans=1
+                )
+
+            def forward(s, x, mask=None, h_grid=None, w_grid=None):
+                x_cls, x_patch_flat = s.backbone._fcmae(x, mask=mask)
+                return x_cls, s.recon_head(x_patch_flat, h_grid=h_grid, w_grid=w_grid)
+
+        self.model = Model().to(device=self.device)
         if self.is_distributed:
-            self.backbone = DDP(self.backbone, device_ids=[self.local_rank])
-            self.recon_head = DDP(self.recon_head, device_ids=[self.local_rank])
+            self.model = DDP(self.model, device_ids=[self.local_rank], find_unused_parameters=True)
 
         # --- Optimizer (Constant LR, No Scheduler) ---
         self.optimizer = optim.AdamW(
-            list(self.backbone.parameters()) + list(self.recon_head.parameters()),
+            list(self.model.parameters()),
             lr=self.lr,
             weight_decay=self.weight_decay
         )
@@ -109,16 +117,15 @@ class PreTrainer:
         if self.sampler is not None:
             self.sampler.set_epoch(epoch_index)
 
-        self.backbone.train()
-        self.recon_head.train()
+        self.model.train()
 
         total_loss = 0.0
         for i, batch_imgs in enumerate(self.loader):
             self.optimizer.zero_grad(set_to_none=True)
 
             # We only need the first global crop
-            teacher_crop = batch_imgs['teacher']['global_crops'][0].to(self.device, non_blocking=True)
-            student_crop = batch_imgs['student']['global_crops'][0].to(self.device, non_blocking=True)
+            teacher_crop = batch_imgs['teacher']['global_crops'].to(self.device)
+            student_crop = batch_imgs['student']['global_crops'].to(self.device)
 
             B, C, H, W = student_crop.shape
             mask_grid_h = H // self.stride_size
@@ -127,23 +134,14 @@ class PreTrainer:
             # Generate masks for the batch
             masks_list = []
             for _ in range(B):
-                m = self.mask_generator()  # Returns 1D array, 1 = dropped/masked
-                masks_list.append(torch.from_numpy(m).bool())
+                masks_list.append(torch.from_numpy(self.mask_generator()).bool())
 
             masks_flat = torch.stack(masks_list).to(self.device)
             masks_spatial = masks_flat.view(B, mask_grid_h, mask_grid_w)
-            
-            # Active masks (True where patches are kept/visible)
             active_masks = ~masks_spatial
 
             with torch.amp.autocast('cuda'):
-                # 1. Forward backbone with the augmented masked view
-                x_cls, x_patch_flat = self.backbone(student_crop, mask=active_masks)
-
-                # 2. Reconstruct pixels
-                reconstructed = self.recon_head(x_patch_flat, h_grid=mask_grid_h, w_grid=mask_grid_w)
-
-                # 3. Simple MSE loss against the unaugmented original view (ignore cls token)
+                x_cls, reconstructed = self.model(student_crop, mask=active_masks, h_grid=mask_grid_h, w_grid=mask_grid_w)
                 loss = 0.0 * x_cls.sum() + F.mse_loss(reconstructed, teacher_crop)
 
             self.scaler.scale(loss).backward()
@@ -168,7 +166,6 @@ class PreTrainer:
 
         for epoch in iterator:
             avg_loss = self.train_one_epoch(epoch)
-            
             if self.rank == 0:
                 logger.info(f"--- Epoch {epoch:03d} Complete | Avg MSE Loss: {avg_loss:.6f} ---")
 
@@ -176,12 +173,12 @@ class PreTrainer:
         if self.rank == 0:
             os.makedirs("weights", exist_ok=True)
             save_path = "weights/pretrained.pth"
-            
+
             torch.save({
-                'backbone': self.backbone.module.state_dict() if self.is_distributed else self.backbone.state_dict(),
-                'recon_head': self.recon_head.module.state_dict() if self.is_distributed else self.recon_head.state_dict(),
+                'backbone': self.model.module.backbone.state_dict() if self.is_distributed else self.model.backbone.state_dict(),
+                'recon_head': self.model.module.recon_head.state_dict() if self.is_distributed else self.model.recon_head.state_dict(),
             }, save_path)
-            
+
             logger.info(f"Pretraining complete. Weights saved to {save_path}")
 
         if self.is_distributed:
