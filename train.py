@@ -271,7 +271,7 @@ class Trainer:
 
                     loss_dino = self.dino_loss_fn(s_dino_out, t_dino_out, current_teacher_temp, n_teacher_crops=self.global_crops_number)
                     loss_ibot = self.ibot_loss_fn(s_ibot_out, t_ibot_out, current_teacher_temp)
-                    loss_koleo = self.koleo_loss_fn(s_dino_global_out[::2])  # Pass ONLY the even rows (unique independent images)
+                    loss_koleo = self.koleo_loss_fn(student_global_cls[::2])  # Pass ONLY the even rows (unique independent images)
 
                     # loss_gram = self.gram_loss_fn(student_patches_list[0], teacher_patches_list[0])
                     # loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)

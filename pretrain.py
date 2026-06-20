@@ -139,10 +139,13 @@ class PreTrainer:
             masks_flat = torch.stack(masks_list).to(self.device)
             masks_spatial = masks_flat.view(B, mask_grid_h, mask_grid_w)
             active_masks = ~masks_spatial
+            upsampled_masks = active_masks.repeat_interleave(self.stride_size, dim=1).repeat_interleave(self.stride_size, dim=2).unsqueeze(1)
 
             with torch.amp.autocast('cuda'):
                 x_cls, reconstructed = self.model(student_crop, mask=active_masks, h_grid=mask_grid_h, w_grid=mask_grid_w)
-                loss = 0.0 * x_cls.sum() + F.mse_loss(reconstructed, teacher_crop)
+
+                mse = (reconstructed - teacher_crop) ** 2
+                loss = 0.0 * x_cls.sum() + (mse * upsampled_masks).sum() / upsampled_masks.sum()
 
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)

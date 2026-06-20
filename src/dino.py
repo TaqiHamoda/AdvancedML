@@ -375,9 +375,8 @@ class DINOHead(nn.Module):
             nn.Linear(hidden_dim, bottleneck_dim),
             nn.GELU(),
             nn.LayerNorm(bottleneck_dim),
-            nn.Linear(bottleneck_dim, out_dim, bias=False),
-            nn.LayerNorm(out_dim),
         )
+        self.last_layer = nn.utils.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
 
         self.apply(self._init_weights)
 
@@ -388,4 +387,5 @@ class DINOHead(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        return self.mlp(x)
+        x = self.last_layer(self.mlp(x))
+        return F.normalize(x, dim=-1, p=2)
