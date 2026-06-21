@@ -201,7 +201,7 @@ class FeatureFusionBlock(nn.Module):
 
         upsampled = [stages[0]]
         for s in stages[1:]:
-            upsampled.append(F.interpolate(s, size=target_size, mode='bilinear', align_corners=False))
+            upsampled.append(F.interpolate(s, size=target_size, mode='nearest'))
 
         fused = torch.cat(upsampled, dim=1) 
         return self.mlp(fused)
@@ -391,5 +391,6 @@ class DINOHead(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        x = self.last_layer(self.mlp(x))
-        return F.normalize(x, dim=-1, p=2)
+        x = self.mlp(x)
+        x = F.normalize(x, dim=-1, p=2)
+        return self.last_layer(x)

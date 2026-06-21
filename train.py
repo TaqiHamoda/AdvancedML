@@ -225,9 +225,8 @@ class Trainer:
             for _ in range(student_global_crops.shape[0]):
                 masks_list.append(torch.from_numpy(self.mask_generator()).bool())  # True means "Drop" here
 
-            # Original iBOT mask (B * N_patches, C, W, H). True = Keep.
-            active_masks = torch.stack(masks_list).to(self.device)
-            active_masks = ~active_masks
+            masks_spatial = torch.stack(masks_list).to(self.device)
+            active_masks = ~masks_spatial  # Original iBOT mask (B * N_patches, C, W, H). True = Keep.
 
             is_accumulating = ((i + 1) % self.accum_iter != 0) and ((i + 1) != len(self.loader))
             if self.is_distributed and is_accumulating:
@@ -245,8 +244,8 @@ class Trainer:
                         # Teacher gets no masks
                         teacher_cls, teacher_patches = self.teacher(teacher_global_crops, mask=None)
 
-                        scale_factor = int(teacher_patches.shape[-2] ** 0.5) // active_masks.shape[-1]
-                        upsampled_masks = active_masks.repeat_interleave(scale_factor, dim=1).repeat_interleave(scale_factor, dim=2)
+                        scale_factor = int(teacher_patches.shape[-2] ** 0.5) // masks_spatial.shape[-1]
+                        upsampled_masks = masks_spatial.repeat_interleave(scale_factor, dim=1).repeat_interleave(scale_factor, dim=2)
                         upsampled_masks = upsampled_masks.flatten(1)  # (B, H, W) -> (B, H*W)
 
                         t_patches = teacher_patches[upsampled_masks]
