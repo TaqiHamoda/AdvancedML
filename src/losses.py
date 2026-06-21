@@ -117,9 +117,8 @@ class DINOLoss(Centering):
         """
         s_log_probs, t_probs = self.get_probs(student_output, teacher_output, teacher_temp)
 
-        B = teacher_output.shape[0] // n_teacher_crops
-
         # Reshape to (n_crops, B, D)
+        B = teacher_output.shape[0] // n_teacher_crops
         n_student_crops = student_output.shape[0] // B
         t_probs = t_probs.view(B, n_teacher_crops, -1)
         s_log_probs = s_log_probs.view(B, n_student_crops, -1)

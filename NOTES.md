@@ -5,6 +5,10 @@ A cluster of two Quadro RTX 6000 GPUs
 
 ## Architecture
 
+TODO: Explain changes to the architecture:
+    - Concatenating stages 1, 2, and 3 into a hypercolumn and using an FPN.
+    - Doing FCMAE pretraining for 10 epochs
+
 ## Losses
 
 ### Gram Loss

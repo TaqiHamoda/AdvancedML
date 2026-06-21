@@ -80,9 +80,7 @@ class TVGAttenuation(torch.nn.Module):
 
 class SonarDataset(Dataset):
     """
-    Loads pre-processed .npy sonar tiles.
-    Expected input: 384x384 numpy matrices, normalized [0, 1].
-    Output: (1, 384, 384) FloatTensors.
+    Loads pre-processed .npz sonar tiles.
     """
     def __init__(self, data_dir="data/processed", ext="*.npz"):
         super().__init__()
@@ -106,11 +104,11 @@ class SonarDataset(Dataset):
         else:
             distances = 1 - distances  # Port normalized dist from nadir
 
-        data = torch.from_numpy(data[np.newaxis, :, :])  # Add channel dim -> (1, 384, 384)
+        data = torch.from_numpy(data[np.newaxis, :, :])  # Add channel dim -> (1, W, H)
         if torch.isnan(data).any() or torch.isinf(data).any():
             data = torch.nan_to_num(data, nan=0.0, posinf=1.0, neginf=0.0)
 
-        distances = torch.from_numpy(distances[np.newaxis, :, :])  # Add channel dim -> (1, 384, 384)
+        distances = torch.from_numpy(distances[np.newaxis, :, :])  # Add channel dim -> (1, W, H)
         if torch.isnan(distances).any() or torch.isinf(distances).any():
             distances = torch.nan_to_num(distances, nan=0.0, posinf=1.0, neginf=0.0)
 
@@ -126,7 +124,7 @@ class SonarDataTransform:
         self,
         global_crops_number=2,
         local_crops_number=8,
-        global_crops_size=288,
+        global_crops_size=224,
         local_crops_size=96,
     ):
         self.global_crops_number = global_crops_number
@@ -164,7 +162,7 @@ class SonarDataTransform:
 
         image, distances = data
 
-        # --- Global Crops (2 views) ---
+        # --- Global Crops ---
         # Used by both Teacher and Student
         for _ in range(self.global_crops_number):
             crop_aug, crop_dist = self.flips(self.global_crop(image, distances))
@@ -175,7 +173,7 @@ class SonarDataTransform:
 
             distance_crops.append(crop_dist)
 
-        # --- Local Crops (8+ views) ---
+        # --- Local Crops ---
         # Used by Student only to encourage local-to-global correspondence
         for _ in range(self.local_crops_number):
             crop_aug, crop_dist = self.flips(self.local_crop(image, distances))
@@ -207,7 +205,7 @@ class TransformedDataset(torch.utils.data.Dataset):
         data_dir="data/processed", ext="*.npz",
         global_crops_number=2,
         local_crops_number=8,
-        global_crops_size=288,
+        global_crops_size=224,
         local_crops_size=96,
     ):
         self.ds = SonarDataset(data_dir=data_dir, ext=ext)
@@ -250,7 +248,7 @@ class TransformedDataset(torch.utils.data.Dataset):
 class MaskingGenerator:
     def __init__(
         self,
-        input_size=288,
+        input_size=224,
         stride_size=32,
         mask_ratio=0.5,
         min_num_patches=4,     # Minimum size of a single block

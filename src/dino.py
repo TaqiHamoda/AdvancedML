@@ -85,14 +85,14 @@ class SparseDropPath(nn.Module):
 
 class SparseDepthwiseBypass(nn.Module):
     """
-    Bypasses spconv's lack of depthwise support by utilizing PyTorch's native 
-    highly-optimized dense depthwise convolutions, while perfectly preserving 
+    Bypasses spconv's lack of depthwise support by utilizing PyTorch's native
+    highly-optimized dense depthwise convolutions, while perfectly preserving
     the sparse Submanifold mathematical properties.
     """
     def __init__(self, dim, kernel_size=7):
         super().__init__()
         self.dwconv = nn.Conv2d(
-            dim, dim, 
+            dim, dim,
             kernel_size=kernel_size,
             padding=kernel_size // 2,
             groups=dim,
@@ -181,7 +181,7 @@ class ConvNeXtV2Decoder(nn.Module):
 
 
 class FeatureFusionBlock(nn.Module):
-    """Fuses the output from multiple stages into a semantically compressed hypercolumn."""
+    """Fuses the output from multiple stages into a semantically compressed hypercolumn using a Feature Pyramid Network (FPN)."""
     def __init__(self, stage_dims, middle_dim=512):
         super().__init__()
 
@@ -226,7 +226,7 @@ class ConvNeXtV2(nn.Module):
         elif arch == "huge":
             depths = [3, 3, 27, 3]
             dims = [352, 704, 1408, 2816]
-            fusion_dim = 2581
+            fusion_dim = 2582
         else:
             raise ValueError(f"Configuration {arch} doesn't exist. Please use one of the supported configurations: tiny, base, large, huge.")
 
@@ -381,14 +381,6 @@ class DINOHead(nn.Module):
             nn.LayerNorm(bottleneck_dim),
         )
         self.last_layer = nn.utils.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
-
-        self.apply(self._init_weights)
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            nn.init.trunc_normal_(m.weight, std=.02)
-            if hasattr(m, 'bias') and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
         x = self.mlp(x)
