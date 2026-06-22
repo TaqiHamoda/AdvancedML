@@ -190,8 +190,8 @@ class FeaturePyramidBlock(nn.Module):
 
         self.mlp = nn.Sequential(
             nn.Conv2d(in_dim, middle_dim, kernel_size=3, padding=1),  # Spatially mix features
-            nn.GELU(),
             SpatialLayerNorm(middle_dim),
+            nn.GELU(),
             nn.Conv2d(middle_dim, out_dim, kernel_size=1)
         )
 
@@ -374,11 +374,11 @@ class DINOHead(nn.Module):
 
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
             nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, bottleneck_dim),
             nn.GELU(),
+            nn.Linear(hidden_dim, bottleneck_dim),
             nn.LayerNorm(bottleneck_dim),
+            nn.GELU(),
         )
         self.last_layer = nn.utils.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
 
