@@ -275,16 +275,22 @@ class Trainer:
                     loss_ibot = self.ibot_loss_fn(s_ibot_out, t_ibot_out, current_teacher_temp)
                     loss_koleo = self.koleo_loss_fn(student_global_cls[::2])  # Pass ONLY the even rows (unique independent images)
 
+                    # --- HSIC Loss ---
+                    grid_size = int(student_global_patches.shape[-2] ** 0.5)
+                    dists = F.adaptive_avg_pool2d(distance_global_crops, (grid_size, grid_size)).reshape(-1, 1)  # (B * N_patches, 1)
+                    features = student_global_patches.reshape(-1, student_global_patches.shape[-1])  # (B * N_patches, output_dim)
+                    loss_hsic = self.hsic_loss_fn(features, dists)
+
                     # loss_gram = self.gram_loss_fn(student_patches_list[0], teacher_patches_list[0])
                     # loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)
-                    loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_koleo * loss_koleo)
+                    loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_hsic * loss_hsic) + (self.w_koleo * loss_koleo)
                     loss = loss / self.accum_iter  # Normalize loss to account for accumulation
 
                 # Log only on Master
                 if self.rank == 0 and i % self.accum_iter == 0:
                     logger.info(f"Epoch {epoch_index:03d} [{i:04d}/{len(self.loader)}] "
                         f"lr: {current_lr:.6f}, t: {self.teacher_temp_schedule[it]:.4f}, m: {self.momentum_schedule[it]:.4f}, "
-                        f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
+                        f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, HSIC: {loss_hsic.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
                         # f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
 
                 # Backward pass (Accumulates gradients into .grad attributes)
@@ -292,7 +298,7 @@ class Trainer:
 
             # Manually delete heavy tensors to free VRAM for the next iteration
             # del loss, loss_ibot, loss_gram, loss_koleo
-            del loss, loss_dino, loss_ibot, loss_koleo
+            del loss, loss_dino, loss_ibot, loss_hsic, loss_koleo
             del s_dino_out, t_dino_out, s_ibot_out, t_ibot_out
             del student_local_cls, student_local_patches, s_dino_local_out
             del s_dino_global_out, s_global_patches, student_global_cls, student_global_patches

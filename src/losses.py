@@ -320,8 +320,8 @@ class RFFHSICLoss(nn.Module):
         N = features.size(0)
 
         # Map features and targets to the RFF space
-        Z_f = self.get_rff(features, self.W_f, self.b_f)
-        Z_t = self.get_rff(targets, self.W_t, self.b_t)
+        Z_f = self.get_rff(features.float(), self.W_f, self.b_f)
+        Z_t = self.get_rff(targets.float(), self.W_t, self.b_t)
 
         # Mean-center the RFF representations
         Z_f_c = Z_f - Z_f.mean(dim=0, keepdim=True)

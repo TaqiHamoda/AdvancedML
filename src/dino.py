@@ -124,7 +124,7 @@ class SparseBlock(nn.Module):
         super().__init__()
         self.dwconv = SparseDepthwiseBypass(dim=dim, kernel_size=7)
 
-        self.norm = nn.LayerNorm(dim, eps=1e-6) 
+        self.norm = nn.LayerNorm(dim, eps=1e-6)
         self.pwconv1 = nn.Linear(dim, 4 * dim)
         self.act = nn.GELU()
         self.grn = SparseGRN(4 * dim)
@@ -180,7 +180,7 @@ class ConvNeXtV2Decoder(nn.Module):
         return self.head_proj(x.flatten(2).transpose(1, 2))
 
 
-class FeatureFusionBlock(nn.Module):
+class FeaturePyramidBlock(nn.Module):
     """Fuses the output from multiple stages into a semantically compressed hypercolumn using a Feature Pyramid Network (FPN)."""
     def __init__(self, stage_dims, middle_dim=512):
         super().__init__()
@@ -189,7 +189,7 @@ class FeatureFusionBlock(nn.Module):
         out_dim = stage_dims[-1]
 
         self.mlp = nn.Sequential(
-            nn.Conv2d(in_dim, middle_dim, kernel_size=1),
+            nn.Conv2d(in_dim, middle_dim, kernel_size=3, padding=1),  # Spatially mix features
             nn.GELU(),
             SpatialLayerNorm(middle_dim),
             nn.Conv2d(middle_dim, out_dim, kernel_size=1)
@@ -253,7 +253,7 @@ class ConvNeXtV2(nn.Module):
             self.stages.append(stage_blocks)
             cur += depths[i]
 
-        self.fusion = FeatureFusionBlock(dims[1:], middle_dim=fusion_dim)
+        self.fusion = FeaturePyramidBlock(dims[1:], middle_dim=fusion_dim)
 
         self.embed_dim = dims[-1]
 
