@@ -180,28 +180,34 @@ class ConvNeXtV2Decoder(nn.Module):
         return self.head_proj(x.flatten(2).transpose(1, 2))
 
 
-class FeaturePyramidBlock(nn.Module):
-    """Fuses the output from multiple stages into a semantically compressed hypercolumn using a Feature Pyramid Network (FPN)."""
-    def __init__(self, stage_dims, middle_dim=512):
+class FeatureFusionBlock(nn.Module):
+    """
+    Fuses the output from multiple stages into a semantically compressed hypercolumn using an MLP.
+
+    Sources: https://arxiv.org/abs/1411.5752
+    """
+    def __init__(self, stage_dims):
         super().__init__()
 
-        in_dim = sum(stage_dims)
-        out_dim = stage_dims[-1]
+        n = len(stage_dims)
+        if n < 2:
+            raise ValueError("Number of stages to fuse has to be at least 2.")
 
-        self.mlp = nn.Sequential(
-            nn.Conv2d(in_dim, middle_dim, kernel_size=3, padding=1),  # Spatially mix features
-            SpatialLayerNorm(middle_dim),
-            nn.GELU(),
-            nn.Conv2d(middle_dim, out_dim, kernel_size=1)
-        )
+        self.mlp = nn.Sequential()
+        for i in range(n - 1):
+            in_dim, out_dim = sum(stage_dims[i:]), sum(stage_dims[i + 1:])
 
+            self.mlp.append(nn.Conv2d(in_dim, out_dim, kernel_size=1))
+            if i < n - 2:
+                self.mlp.append(SpatialLayerNorm(out_dim))
+                self.mlp.append(nn.GELU())
 
     def forward(self, stages):
         target_size = stages[0].shape[-2:]
 
         upsampled = [stages[0]]
         for s in stages[1:]:
-            upsampled.append(F.interpolate(s, size=target_size, mode='nearest'))
+            upsampled.append(F.interpolate(s, size=target_size, mode='bilinear', align_corners=False))
 
         fused = torch.cat(upsampled, dim=1) 
         return self.mlp(fused)
@@ -214,33 +220,25 @@ class ConvNeXtV2(nn.Module):
         if arch == "tiny":
             depths = [3, 3, 9, 3]
             dims = [96, 192, 384, 768]
-            fusion_dim = 512
         elif arch == "base":
             depths = [3, 3, 27, 3]
             dims = [128, 256, 512, 1024]
-            fusion_dim = 768
         elif arch == "large":
             depths = [3, 3, 27, 3]
             dims = [192, 384, 768, 1536]
-            fusion_dim = 1408
         elif arch == "huge":
             depths = [3, 3, 27, 3]
             dims = [352, 704, 1408, 2816]
-            fusion_dim = 2582
         else:
             raise ValueError(f"Configuration {arch} doesn't exist. Please use one of the supported configurations: tiny, base, large, huge.")
 
-        decoder_dim = dims[-2]
-
         self.downsample_layers = nn.ModuleList()
-
-        # Add a dense stem first to prevent boundary artifacts from sparse conv
         self.downsample_layers.append(nn.Sequential(
             nn.Conv2d(in_chans, dims[0], kernel_size=4, stride=4),
             SpatialLayerNorm(dims[0])
-        ))
+        ))  # Add a dense stem first to prevent boundary artifacts from sparse conv
         for i in range(3):
-            self.downsample_layers.append(SparseDownsample(dims[i], dims[i+1], kernel_size=2, stride=2))
+            self.downsample_layers.append(SparseDownsample(dims[i], dims[i + 1], kernel_size=2, stride=2))
 
         self.stages = nn.ModuleList()
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
@@ -253,14 +251,14 @@ class ConvNeXtV2(nn.Module):
             self.stages.append(stage_blocks)
             cur += depths[i]
 
-        self.fusion = FeaturePyramidBlock(dims[1:], middle_dim=fusion_dim)
+        self.fusion = FeatureFusionBlock(dims[1:])
 
         self.embed_dim = dims[-1]
 
         self.norm_patch = SpatialLayerNorm(self.embed_dim)
         self.norm_cls = nn.LayerNorm(self.embed_dim, eps=1e-6)
 
-        self.decoder = ConvNeXtV2Decoder(encoder_dim=self.embed_dim, decoder_dim=decoder_dim)
+        self.decoder = ConvNeXtV2Decoder(encoder_dim=self.embed_dim, decoder_dim=dims[-2])
 
         self.apply(self._init_weights)
 
@@ -343,9 +341,9 @@ class ReconstructionHead(nn.Module):
     def __init__(self, embed_dim, patch_size=32, in_chans=1):
         super().__init__()
         self.head = nn.ConvTranspose2d(
-            in_channels=embed_dim, 
-            out_channels=in_chans, 
-            kernel_size=patch_size, 
+            in_channels=embed_dim,
+            out_channels=in_chans,
+            kernel_size=patch_size,
             stride=patch_size
         )
 

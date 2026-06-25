@@ -8,9 +8,8 @@ from torch.utils.data.distributed import DistributedSampler
 from contextlib import nullcontext
 
 import numpy as np
-import logging
+import os, logging, time
 from tqdm import tqdm
-import os, time
 from pathlib import Path
 
 # Import your modules
@@ -65,7 +64,7 @@ class Trainer:
 
         # --- Hyperparameters ---
         self.output_dim = 4096  # Number of prototypes outputted by DINO
-        self.batch_size = 30  # Max possible per GPU
+        self.batch_size = 29  # Max possible per GPU
         self.effective_batch_size = 8192 // self.world_size  # Desired batch size per GPU
         self.accum_iter = self.effective_batch_size // self.batch_size  # Number of gradient accumulation steps
         self.base_lr = 5e-5 * (self.world_size * self.effective_batch_size / 1024) ** 0.5  # Square root scaling
@@ -253,6 +252,8 @@ class Trainer:
                         t_dino_out = self.teacher_dino_head(teacher_cls)  # (B * N_patches, output_dim)
                         t_ibot_out = self.teacher_ibot_head(t_patches)  # (Total_Masked_Tokens, K)
 
+                        del teacher_cls, teacher_patches, t_patches
+
                     student_global_cls, student_global_patches = self.student(student_global_crops, mask=active_masks)
 
                     s_global_patches = student_global_patches[upsampled_masks]
@@ -261,6 +262,8 @@ class Trainer:
 
                     student_local_cls, student_local_patches = self.student(student_local_crops, mask=None)
                     s_dino_local_out = self.student_dino_head(student_local_cls)  # (B * N_patches, output_dim)
+
+                    del s_global_patches, student_local_cls, student_local_patches
 
                     # Interleave the student outputs per image before calculating loss
                     s_dino_out = torch.cat([
@@ -300,11 +303,9 @@ class Trainer:
             # del loss, loss_ibot, loss_gram, loss_koleo
             del loss, loss_dino, loss_ibot, loss_hsic, loss_koleo
             del s_dino_out, t_dino_out, s_ibot_out, t_ibot_out
-            del student_local_cls, student_local_patches, s_dino_local_out
-            del s_dino_global_out, s_global_patches, student_global_cls, student_global_patches
-            del t_patches, upsampled_masks, teacher_patches, teacher_cls
+            del s_dino_global_out, student_global_cls, student_global_patches
             del distance_global_crops, student_local_crops, student_global_crops, teacher_global_crops
-            del active_masks, masks_list
+            del active_masks, masks_list, upsampled_masks, s_dino_local_out
 
             if ((i + 1) % self.accum_iter == 0) or ((i + 1) == len(self.loader)):
                 self.scaler.unscale_(self.optimizer)

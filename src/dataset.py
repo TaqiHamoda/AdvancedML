@@ -13,9 +13,8 @@ class NormalizeTransform(torch.nn.Module):
         super().__init__()
 
         # Normalize inputs (centering around 0 for neural net stability)
-        # Input is in [0, 1]. Mean and std are based on dataset stats
+        # Mean and std are based on dataset stats
         self.transform = v2.Compose([
-            # lambda x: torch.clamp(x, 0, 1),
             v2.Normalize(mean=[0.7706402539115733], std=[0.15731125981879593])
         ])
 
@@ -144,10 +143,10 @@ class SonarDataTransform:
         # If you want to make the image or objects unclear, increase the noise instead to remain
         # accurate to the physics (interference is a more accurate way to model loss of clarity).
         self.augmentations = v2.Compose([
-            TVGAttenuation(retention=(0.00, 1.00), p=0.3),  # TVG Attenuation to simulate propagation loss
+            TVGAttenuation(retention=(0.00, 0.50), p=0.3),  # TVG Attenuation to simulate propagation loss
             v2.RandomApply([v2.ColorJitter(
                 brightness=0.50,                            # Brightness corresponds to sonar gain (intensity)
-                contrast=0.75,                              # Contrast corresponds to dynamic range of reciever
+                contrast=0.50,                              # Contrast corresponds to dynamic range of reciever
                 saturation=0, hue=0)                        # Data is only 1 channel and the concept of colors doesn't apply to sonar
             ], p=0.5),
             GaussianNoise(sigma=(0.00, 0.30), p=0.3),       # Gaussian Noise to simulate speckle noise
