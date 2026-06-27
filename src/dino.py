@@ -209,7 +209,7 @@ class FeatureFusionBlock(nn.Module):
         for s in stages[1:]:
             upsampled.append(F.interpolate(s, size=target_size, mode='bilinear', align_corners=False))
 
-        fused = torch.cat(upsampled, dim=1) 
+        fused = torch.cat(upsampled, dim=1)
         return self.mlp(fused)
 
 
