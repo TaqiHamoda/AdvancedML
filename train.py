@@ -64,7 +64,7 @@ class Trainer:
 
         # --- Hyperparameters ---
         self.output_dim = 4096  # Number of prototypes outputted by DINO
-        self.batch_size = 29  # Max possible per GPU
+        self.batch_size = 12  # Max possible per GPU
         self.effective_batch_size = 8192 // self.world_size  # Desired batch size per GPU
         self.accum_iter = self.effective_batch_size // self.batch_size  # Number of gradient accumulation steps
         self.base_lr = 5e-5 * (self.world_size * self.effective_batch_size / 1024) ** 0.5  # Square root scaling
@@ -76,7 +76,7 @@ class Trainer:
 
         self.teacher_temp_start = 0.04
         self.teacher_temp_end = 0.07
-        self.momentum_teacher_start = 0.996
+        self.momentum_teacher_start = 0.994
         self.momentum_teacher_end = 1.0
 
         self.w_dino = 1.0
@@ -125,7 +125,7 @@ class Trainer:
 
         self.lr_schedule = cosine_scheduler(
             base_value=self.base_lr,
-            final_value=self.base_lr,
+            final_value=1e-6,
             epochs=self.epochs,
             niter_per_ep=self.effective_niter_per_ep,
             warmup_epochs=self.warmup_epochs,

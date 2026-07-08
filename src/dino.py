@@ -251,13 +251,12 @@ class ConvNeXtV2(nn.Module):
             self.stages.append(stage_blocks)
             cur += depths[i]
 
-        self.fusion = FeatureFusionBlock(dims[1:])
-
         self.embed_dim = dims[-1]
 
         self.norm_patch = SpatialLayerNorm(self.embed_dim)
         self.norm_cls = nn.LayerNorm(self.embed_dim, eps=1e-6)
 
+        self.fusion = FeatureFusionBlock(dims)
         self.decoder = ConvNeXtV2Decoder(encoder_dim=self.embed_dim, decoder_dim=dims[-2])
 
         self.apply(self._init_weights)
@@ -328,7 +327,7 @@ class ConvNeXtV2(nn.Module):
         return self._get_output(x, mask)
 
     def forward(self, x, mask=None):
-        x = self.fusion(self._inference(x, mask)[1:])
+        x = self.fusion(self._inference(x, mask))
         return self._get_output(x, mask)
 
 
