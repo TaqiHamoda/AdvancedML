@@ -81,9 +81,9 @@ class Trainer:
 
         self.w_dino = 1.0
         self.w_ibot = 1.0
-        self.w_gram = 0.5
+        self.w_gram = 0.3
+        self.w_koleo = 0.1
         self.w_hsic = 0.0
-        self.w_koleo = 0.01
 
         # --- Masking, Data & Sampler ---
         self.mask_generator = MaskingGenerator(input_size=self.global_crops_size, stride_size=self.stride_size, mask_ratio=0.5)
@@ -144,15 +144,24 @@ class Trainer:
         # --- Models ---
         self.student = ConvNeXtV2(in_chans=1).to(self.device)
         self.teacher = ConvNeXtV2(in_chans=1).to(self.device)
+        self.gram_teacher = ConvNeXtV2(in_chans=1).to(self.device)
+
         embed_dim = self.student.embed_dim
+
+        self.teacher.eval()  # Teacher is not trained with gradients
+        self.gram_teacher.eval()  # Gram Teacher is not trained at all
+
+        for p in list(self.teacher.parameters()) + list(self.gram_teacher.parameters()):
+            p.requires_grad = False
+
+        self.teacher.load_state_dict(self.student.state_dict())
 
         self.student_dino_head = DINOHead(embed_dim, out_dim=self.output_dim).to(self.device)
         self.teacher_dino_head = DINOHead(embed_dim, out_dim=self.output_dim).to(self.device)
 
-        self.teacher.eval()  # Teacher is not trained with gradients
-        for p in self.teacher.parameters():
-            p.requires_grad = False
-        self.teacher.load_state_dict(self.student.state_dict())
+        self.teacher_dino_head.eval()
+        self.teacher_dino_head.load_state_dict(self.teacher_dino_head.state_dict())
+        for p in self.teacher_dino_head.parameters(): p.requires_grad = False
 
         self.student_ibot_head = DINOHead(embed_dim, out_dim=self.output_dim).to(self.device)
         self.teacher_ibot_head = DINOHead(embed_dim, out_dim=self.output_dim).to(self.device)
@@ -243,16 +252,20 @@ class Trainer:
                         # Teacher gets no masks
                         teacher_cls, teacher_patches = self.teacher(teacher_global_crops, mask=None)
 
+                        # Gram Teacher gets no masks
+                        gram_teacher_cls, gram_teacher_patches = self.gram_teacher(teacher_global_crops, mask=None)
+
                         scale_factor = int(teacher_patches.shape[-2] ** 0.5) // masks_spatial.shape[-1]
                         upsampled_masks = masks_spatial.repeat_interleave(scale_factor, dim=1).repeat_interleave(scale_factor, dim=2)
                         upsampled_masks = upsampled_masks.flatten(1)  # (B, H, W) -> (B, H*W)
 
                         t_patches = teacher_patches[upsampled_masks]
+                        gram_patches = gram_teacher_patches[upsampled_masks]
 
                         t_dino_out = self.teacher_dino_head(teacher_cls)  # (B * N_patches, output_dim)
                         t_ibot_out = self.teacher_ibot_head(t_patches)  # (Total_Masked_Tokens, K)
 
-                        del teacher_cls, teacher_patches, t_patches
+                        del teacher_cls, teacher_patches, t_patches, gram_teacher_cls
 
                     student_global_cls, student_global_patches = self.student(student_global_crops, mask=active_masks)
 
@@ -263,7 +276,12 @@ class Trainer:
                     student_local_cls, student_local_patches = self.student(student_local_crops, mask=None)
                     s_dino_local_out = self.student_dino_head(student_local_cls)  # (B * N_patches, output_dim)
 
-                    del s_global_patches, student_local_cls, student_local_patches
+                    loss_gram = self.gram_loss_fn(
+                        s_global_patches.reshape(self.batch_size, -1, s_global_patches.shape[-1]),  # (B, N_patches, C)
+                        gram_patches.reshape(self.batch_size, -1, gram_patches.shape[-1])           # (B, N_patches, C)
+                    )
+
+                    del s_global_patches, student_local_cls, student_local_patches, gram_patches
 
                     # Interleave the student outputs per image before calculating loss
                     s_dino_out = torch.cat([
@@ -284,24 +302,25 @@ class Trainer:
                     features = student_global_patches.reshape(-1, student_global_patches.shape[-1])  # (B * N_patches, output_dim)
                     loss_hsic = self.hsic_loss_fn(features, dists)
 
-                    # loss_gram = self.gram_loss_fn(student_patches_list[0], teacher_patches_list[0])
-                    # loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_gram * loss_gram) + (self.w_koleo * loss_koleo)
-                    loss = (self.w_dino * loss_dino) + (self.w_ibot * loss_ibot) + (self.w_hsic * loss_hsic) + (self.w_koleo * loss_koleo)
+                    loss = (self.w_dino * loss_dino) +\
+                    (self.w_ibot * loss_ibot) +\
+                    (self.w_gram * loss_gram) +\
+                    (self.w_hsic * loss_hsic) +\
+                    (self.w_koleo * loss_koleo)
                     loss = loss / self.accum_iter  # Normalize loss to account for accumulation
 
                 # Log only on Master
                 if self.rank == 0 and i % self.accum_iter == 0:
                     logger.info(f"Epoch {epoch_index:03d} [{i:04d}/{len(self.loader)}] "
                         f"lr: {current_lr:.6f}, t: {self.teacher_temp_schedule[it]:.4f}, m: {self.momentum_schedule[it]:.4f}, "
-                        f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, HSIC: {loss_hsic.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
-                        # f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
+                        f"DINO: {loss_dino.item():.4f}, iBOT: {loss_ibot.item():.4f}, HSIC: {loss_hsic.item():.4f}, Gram: {loss_gram.item():.4f}, KoLeo: {loss_koleo.item():.4f}")
 
                 # Backward pass (Accumulates gradients into .grad attributes)
                 self.scaler.scale(loss).backward()
 
             # Manually delete heavy tensors to free VRAM for the next iteration
             # del loss, loss_ibot, loss_gram, loss_koleo
-            del loss, loss_dino, loss_ibot, loss_hsic, loss_koleo
+            del loss, loss_dino, loss_ibot, loss_hsic, loss_gram, loss_koleo
             del s_dino_out, t_dino_out, s_ibot_out, t_ibot_out
             del s_dino_global_out, student_global_cls, student_global_patches
             del distance_global_crops, student_local_crops, student_global_crops, teacher_global_crops
@@ -336,6 +355,7 @@ class Trainer:
     def load_checkpoint(self, resume_path):
         checkpoint_path = resume_path / "checkpoint_latest.pth"
         pretrained_path = resume_path / "pretrained.pth"
+        gram_checkpoint_path = resume_path / "gram_teacher.pth"
 
         epoch = -1
         if checkpoint_path.exists():
@@ -386,6 +406,17 @@ class Trainer:
             torch.cuda.empty_cache()
         else:
             if self.rank == 0: logger.warning(f"Checkpoint not found at {checkpoint_path}")
+
+        if gram_checkpoint_path.exists():
+            if self.rank == 0: logger.info(f"Loading Gram Teacher weights from {gram_checkpoint_path}")
+
+            # Load on CPU first to avoid OOM, then move to device
+            checkpoint = torch.load(gram_checkpoint_path, map_location='cpu', weights_only=False)
+            self.gram_teacher.load_state_dict(checkpoint['teacher'])
+
+            # Free memory
+            del checkpoint
+            torch.cuda.empty_cache()
 
         return epoch
 
