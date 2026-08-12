@@ -1,7 +1,9 @@
+from typing import Tuple, List
+
 import numpy as np
 import torch
 
-from .dino import ConvNeXtV2
+from .dino import ConvNeXtV2, DINOHead
 from .dataset import NormalizeTransform
 
 
@@ -29,7 +31,26 @@ def load_backbone(weights_path: str, device = torch.device("cuda")) -> ConvNeXtV
     return model
 
 
-def run_inference(model: ConvNeXtV2, tile: np.ndarray, device = torch.device("cuda")):
+def load_model(weights_path: str, output_dim: int = 4096, device = torch.device("cuda")) -> Tuple[ConvNeXtV2, DINOHead, DINOHead]:
+    checkpoint = torch.load(weights_path, map_location='cpu', weights_only=False)
+
+    dino_weights = checkpoint['student_dino_head']
+    ibot_weights = checkpoint['student_ibot_head']
+
+    backbone = load_backbone(weights_path, device)
+
+    dino_head = DINOHead(in_dim=backbone.embed_dim, out_dim=output_dim)
+    ibot_head = DINOHead(in_dim=backbone.embed_dim, out_dim=output_dim)
+
+    for head, weights in ((dino_head, dino_weights), (ibot_head, ibot_weights)):
+        head.load_state_dict(weights)
+        head.to(device)
+        head.eval()
+
+    return backbone, dino_head, ibot_head
+
+
+def run_inference(model: ConvNeXtV2, tile: np.ndarray, device = torch.device("cuda")) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
     transform = NormalizeTransform()
 
     with torch.no_grad():
@@ -45,6 +66,15 @@ def run_inference(model: ConvNeXtV2, tile: np.ndarray, device = torch.device("cu
     hypercolumn = model.fusion(stages)
     outputs.append(hypercolumn.permute(0, 2, 3, 1).squeeze().cpu().detach().numpy())
 
-    cls, _ = model._get_output(hypercolumn)
+    cls, patch = model._get_output(hypercolumn)
 
-    return cls.squeeze().cpu().detach().numpy(), outputs
+    return cls.squeeze().cpu().detach().numpy(), patch.squeeze().cpu().detach().numpy(), outputs
+
+
+def run_inference_heads(model: ConvNeXtV2, dino_head: DINOHead, ibot_head: DINOHead, tile: np.ndarray, device = torch.device("cuda")):
+    cls, patch, outputs = run_inference(model, tile, device)
+
+    dino_output = dino_head(torch.from_numpy(cls).to(device))
+    ibot_output = ibot_head(torch.from_numpy(patch).to(device))
+
+    return dino_output.squeeze().cpu().detach().numpy(), ibot_output.squeeze().cpu().detach().numpy(), outputs
