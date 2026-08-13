@@ -3,8 +3,22 @@ from typing import Tuple, List
 import numpy as np
 import torch
 
+import matplotlib.pyplot as plt
+
 from .dino import ConvNeXtV2, DINOHead
 from .dataset import NormalizeTransform
+
+
+def show_images(images: List[Tuple[np.ndarray, str]], num_images: int = 5, normalize: bool = True):
+    transform = NormalizeTransform()
+
+    _, axes = plt.subplots(1, num_images, figsize=(15, 3))
+    for i, (image, title) in enumerate(images):
+        img = transform(image).squeeze() if normalize else image.squeeze()
+        axes[i].imshow(img, cmap='gray')
+        axes[i].set_title(title)
+        axes[i].axis('off')
+    plt.show()
 
 
 def load_backbone(weights_path: str, device = torch.device("cuda")) -> ConvNeXtV2:
