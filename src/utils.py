@@ -1,5 +1,7 @@
+from pathlib import Path
 from typing import Tuple, List
 
+import cv2
 import numpy as np
 import torch
 
@@ -9,13 +11,13 @@ from .dino import ConvNeXtV2, DINOHead
 from .dataset import NormalizeTransform
 
 
-def show_images(images: List[Tuple[np.ndarray, str]], num_images: int = 5, normalize: bool = True):
+def show_images(images: List[Tuple[np.ndarray, str]], num_images: int = 5, normalize: bool = True, cmap='gray'):
     transform = NormalizeTransform()
 
     _, axes = plt.subplots(1, num_images, figsize=(15, 3))
     for i, (image, title) in enumerate(images):
-        img = transform(image).squeeze() if normalize else image.squeeze()
-        axes[i].imshow(img, cmap='gray')
+        img = transform(image).squeeze() if normalize else image
+        axes[i].imshow(img, cmap=cmap)
         axes[i].set_title(title)
         axes[i].axis('off')
     plt.show()
