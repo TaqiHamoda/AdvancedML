@@ -8,3 +8,5 @@ umap-learn
 matplotlib
 pyxtf
 spconv-cu120
+faiss-cpu
+ipywidgets
