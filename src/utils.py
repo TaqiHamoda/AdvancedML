@@ -15,6 +15,9 @@ def show_images(images: List[Tuple[np.ndarray, str]], num_images: int = 5, norma
     transform = NormalizeTransform()
 
     _, axes = plt.subplots(1, num_images, figsize=(15, 3))
+    if num_images == 1:
+        axes = (axes, )
+
     for i, (image, title) in enumerate(images):
         img = transform(image).squeeze() if normalize else image
         axes[i].imshow(img, cmap=cmap)
