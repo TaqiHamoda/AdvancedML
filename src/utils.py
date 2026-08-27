@@ -69,11 +69,15 @@ def load_model(weights_path: str, output_dim: int = 4096, device = torch.device(
     return backbone, dino_head, ibot_head
 
 
-def run_inference(model: ConvNeXtV2, tile: np.ndarray, device = torch.device("cuda")) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
+def run_inference(model: ConvNeXtV2, tile: np.ndarray, device = torch.device("cuda"), normalize: bool = True) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
     transform = NormalizeTransform()
 
     with torch.no_grad():
-        input_tensor = transform(tile).unsqueeze(0).to(device)
+        input_tensor = tile
+        if normalize:
+            input_tensor = transform(input_tensor)
+
+        input_tensor = input_tensor.unsqueeze(0).to(device)
 
         # Forward pass returns class embedding and patch embeddings
         stages = model._inference(input_tensor)
