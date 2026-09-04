@@ -15,6 +15,7 @@ class NormalizeTransform(torch.nn.Module):
         # Normalize inputs (centering around 0 for neural net stability)
         # Mean and std are based on dataset stats
         self.transform = v2.Compose([
+            v2.ToDtype(torch.float32, scale=True),
             v2.Normalize(mean=[0.7706402539115733], std=[0.15731125981879593])
         ])
 

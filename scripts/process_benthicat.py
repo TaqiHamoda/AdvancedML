@@ -30,7 +30,7 @@ def xtf_to_data(xtf_path: Path) -> np.ndarray:
         data = np.concatenate((port, stbd), axis=1)
 
         # Clip to range (max cannot be used due to outliers)
-        data = data.clip(0,  2 ** 16 - 1)
+        data = data.clip(0, 2 ** 16 - 1)
         data = np.log1p(data, dtype=np.float32)
         data = np.clip(data, 0, np.percentile(data, 90))  # Clip extreme outliers
         data /= np.max(data)  # Scale to [0,1]

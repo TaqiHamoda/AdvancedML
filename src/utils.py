@@ -1,9 +1,8 @@
-from pathlib import Path
 from typing import Tuple, List
 
-import cv2
 import numpy as np
 import torch
+from sklearn.metrics import confusion_matrix
 
 import matplotlib.pyplot as plt
 
@@ -24,6 +23,50 @@ def show_images(images: List[Tuple[np.ndarray, str]], num_images: int = 5, norma
         axes[i].set_title(title)
         axes[i].axis('off')
     plt.show()
+
+
+def print_iou(y_true, y_pred, labels):
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+
+    # Normalize row-wise (True labels) to handle large scale disparities
+    row_sums = cm.sum(axis=1, keepdims=True)
+    cm_norm = np.divide(
+        cm.astype(float),
+        row_sums,
+        out=np.zeros_like(cm, dtype=float),
+        where=row_sums != 0
+    )
+
+    print("Confusion Matrix (Normalized):")
+
+    header = f"{'True / Pred':>12} | " + " ".join([f"{str(label):>7}" for label in labels])
+    print(header)
+    print("-" * len(header))
+
+    # Print each row with normalized values to 3 decimal places
+    for i, row_label in enumerate(labels):
+        row_str = " ".join([f"{val:>7.3f}" for val in cm_norm[i]])
+        print(f"{str(row_label):>12} | {row_str}")
+
+    print("-" * len(header))
+
+    # --- Calculate and Print IoU on raw counts ---
+    intersection = np.diag(cm)
+    union = cm.sum(axis=1) + cm.sum(axis=0) - intersection
+
+    iou = np.divide(
+        intersection,
+        union,
+        out=np.zeros_like(intersection, dtype=float),
+        where=union != 0
+    )
+
+    print("\nIoU per class:")
+    for label, val in zip(labels, iou):
+        print(f"  Class {str(label):<5}: {val:.3f}")
+
+    print("-" * 20)
+    print(f"Mean IoU (mIoU) : {np.mean(iou):.3f}")
 
 
 def load_backbone(weights_path: str, device = torch.device("cuda")) -> ConvNeXtV2:
